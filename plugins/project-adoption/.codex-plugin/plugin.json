@@ -1,0 +1,20 @@
+{
+  "name": "project-adoption",
+  "version": "0.1.0",
+  "description": "Audit an existing Claude-oriented project before adopting Codex or Grok.",
+  "author": {
+    "name": "gering"
+  },
+  "repository": "https://github.com/gering/agent-plugins",
+  "license": "MIT",
+  "keywords": ["adoption", "migration", "codex", "grok"],
+  "interface": {
+    "displayName": "Project Adoption",
+    "shortDescription": "Audit projects before agent adoption.",
+    "longDescription": "Reports Claude-specific assumptions and safe Codex or Grok adoption steps without changing the project by default.",
+    "developerName": "gering",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Audit this project for Codex and Grok adoption."
+  }
+}

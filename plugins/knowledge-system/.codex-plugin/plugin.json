@@ -1,0 +1,20 @@
+{
+  "name": "knowledge-system",
+  "version": "0.1.0",
+  "description": "Keep durable project knowledge versioned and agent-neutral.",
+  "author": {
+    "name": "gering"
+  },
+  "repository": "https://github.com/gering/agent-plugins",
+  "license": "MIT",
+  "keywords": ["knowledge", "memory", "codex", "grok"],
+  "interface": {
+    "displayName": "Knowledge System",
+    "shortDescription": "Version durable project knowledge.",
+    "longDescription": "Maintains durable project knowledge independently of runtime-specific local memory stores.",
+    "developerName": "gering",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Inspect this project's durable knowledge."
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "name": "gering-agent-plugins",
+  "interface": {
+    "displayName": "gering Agent Plugins"
+  },
+  "plugins": [
+    {
+      "name": "project-adoption",
+      "source": {
+        "source": "local",
+        "path": "./plugins/project-adoption"
+      },
+      "policy": {
+        "installation": "NOT_AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "knowledge-system",
+      "source": {
+        "source": "local",
+        "path": "./plugins/knowledge-system"
+      },
+      "policy": {
+        "installation": "NOT_AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "work-system",
+      "source": {
+        "source": "local",
+        "path": "./plugins/work-system"
+      },
+      "policy": {
+        "installation": "NOT_AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "pr-flow",
+      "source": {
+        "source": "local",
+        "path": "./plugins/pr-flow"
+      },
+      "policy": {
+        "installation": "NOT_AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

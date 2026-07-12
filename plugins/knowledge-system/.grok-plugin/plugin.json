@@ -1,0 +1,11 @@
+{
+  "name": "knowledge-system",
+  "version": "0.1.0",
+  "description": "Keep durable project knowledge versioned and agent-neutral.",
+  "author": {
+    "name": "gering"
+  },
+  "repository": "https://github.com/gering/agent-plugins",
+  "license": "MIT",
+  "keywords": ["knowledge", "memory", "codex", "grok"]
+}

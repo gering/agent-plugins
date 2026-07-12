@@ -1,0 +1,11 @@
+{
+  "name": "pr-flow",
+  "version": "0.1.0",
+  "description": "Run pull-request readiness, review, rebase, and merge safety workflows.",
+  "author": {
+    "name": "gering"
+  },
+  "repository": "https://github.com/gering/agent-plugins",
+  "license": "MIT",
+  "keywords": ["pull-request", "review", "merge", "grok"]
+}
