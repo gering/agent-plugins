@@ -12,9 +12,9 @@ not a runtime distributed here.
   manifest, installation, and tool behavior in the relevant runtime adapter.
 - Do not use `${CLAUDE_PLUGIN_ROOT}`, Claude-only tool names, or Claude session
   commands in Codex or Grok adapters.
-- Detection-only references needed by migration audits must carry
-  `agent-plugins: allow-claude-reference` on the same line. The marker never
-  permits executing or depending on the referenced Claude runtime surface.
+- Detection-only Claude literals needed by migration audits belong in explicit
+  fixture data outside runtime-distributed adapter/helper trees until a
+  structured, non-executable exception format is implemented.
 - Optional external model-family reviewers live under
   `plugins/<plugin>/reviewers/<family>/`, never in `shared/`, `codex/`, or
   `grok/`. They remain read-only and require their own validation contract.

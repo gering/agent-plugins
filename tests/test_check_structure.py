@@ -126,17 +126,6 @@ class StructureCheckTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("forbidden Claude plugin root", result.stderr)
 
-    def test_detection_only_claude_reference_can_be_marked(self) -> None:
-        skill = self.root / "plugins/project-adoption/codex/skills/audit/SKILL.md"
-        skill.parent.mkdir(parents=True)
-        skill.write_text(
-            "Detect `${CLAUDE_PLUGIN_ROOT}`. "
-            "<!-- agent-plugins: allow-claude-reference -->\n",
-            encoding="utf-8",
-        )
-        result = self.run_check()
-        self.assertEqual(result.returncode, 0, result.stderr)
-
     def test_null_json_root_fails(self) -> None:
         (self.root / ".agents/upstream/claude-plugins.json").write_text(
             "null\n", encoding="utf-8"
@@ -232,6 +221,14 @@ class StructureCheckTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("forbidden Claude executable", result.stderr)
 
+    def test_windows_claude_executable_fails(self) -> None:
+        script = self.root / "plugins/work-system/shared/bad.ps1"
+        script.parent.mkdir(parents=True)
+        script.write_text("claude.exe --resume\n", encoding="utf-8")
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("forbidden Claude executable", result.stderr)
+
     def test_unicode_semver_digit_fails(self) -> None:
         self.set_all_manifest_versions("1١.2.3")
         result = self.run_check()
@@ -317,6 +314,14 @@ class StructureCheckTests(unittest.TestCase):
         result = self.run_check()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("unsupported Grok manifest field", result.stderr)
+
+    def test_external_reviewer_code_is_fail_closed(self) -> None:
+        script = self.root / "plugins/swarm/reviewers/anthropic/review.sh"
+        script.parent.mkdir(parents=True)
+        script.write_text("exit 0\n", encoding="utf-8")
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("external reviewer code is fail-closed", result.stderr)
 
 
 if __name__ == "__main__":

@@ -39,7 +39,18 @@ def main() -> int:
         observed = configured["latest_observed_commit"]
         upstream = args.upstream or (ROOT / configured["local_path_hint"])
         upstream = upstream.expanduser().resolve()
-        current = git(upstream, "rev-parse", "HEAD")
+        checkout_head = git(upstream, "rev-parse", "HEAD")
+        main_ref = None
+        current = None
+        for candidate in ("refs/remotes/origin/main", "refs/heads/main"):
+            try:
+                current = git(upstream, "rev-parse", "--verify", candidate)
+                main_ref = candidate
+                break
+            except RuntimeError:
+                continue
+        if current is None or main_ref is None:
+            raise RuntimeError("neither origin/main nor local main is available")
         dirty = git(upstream, "status", "--short")
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, RuntimeError) as exc:
         print(f"UPSTREAM_ERROR {exc}", file=sys.stderr)
@@ -48,7 +59,9 @@ def main() -> int:
     print(f"upstream={upstream}")
     print(f"last_reviewed={reviewed}")
     print(f"latest_observed={observed}")
-    print(f"current={current}")
+    print(f"main_ref={main_ref}")
+    print(f"main_commit={current}")
+    print(f"checkout_head={checkout_head}")
     print(f"dirty={'yes' if dirty else 'no'}")
     if dirty:
         print("dirty_paths:")

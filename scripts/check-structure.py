@@ -82,20 +82,16 @@ FORBIDDEN_ADAPTER_PATTERNS = (
     ("Claude manifest path", re.compile(r"\.claude-plugin")),
     (
         "Claude executable",
-        re.compile(r"(?<![A-Za-z0-9_-])(?:[^\s\"'`|;&()]*/)?claude(?![A-Za-z0-9_.-])"),
+        re.compile(
+            r"(?<![A-Za-z0-9_-])(?:[^\s\"'`|;&()]*/)?claude"
+            r"(?:(?:\.(?:exe|cmd|bat))(?![A-Za-z0-9_.-])|(?![A-Za-z0-9_.-]))"
+        ),
     ),
     ("Claude Workflow tool", re.compile(r"\bWorkflow(?:\s+tool|\s*\()")),
     (
         "Claude slash-command tool",
         re.compile(r"\bSlashCommand(?:\s+tool|\s*\()"),
     ),
-)
-CLAUDE_REFERENCE_ALLOW_MARKER = "agent-plugins: allow-claude-reference"
-CLAUDE_REFERENCE_CONTEXT = re.compile(
-    r"\b(?:audit|detect|flag|identify|match|pattern|report|search)\b", re.IGNORECASE
-)
-CLAUDE_EXECUTION_CONTEXT = re.compile(
-    r"\b(?:exec|execute|invoke|launch|run|start)\b", re.IGNORECASE
 )
 EXPECTED_LICENSE_SHA256 = "c920e7838ac1a06728211ce607e0c73f19bb566823eb888b6a6647c80300aaf1"
 
@@ -397,23 +393,18 @@ def validate_adapter_boundaries() -> None:
             except UnicodeDecodeError:
                 continue
             for line_number, line in enumerate(text.splitlines(), start=1):
-                allow_reference = (
-                    CLAUDE_REFERENCE_ALLOW_MARKER in line
-                    and CLAUDE_REFERENCE_CONTEXT.search(line) is not None
-                    and CLAUDE_EXECUTION_CONTEXT.search(line) is None
-                )
                 for label, pattern in FORBIDDEN_ADAPTER_PATTERNS:
                     if pattern.search(line):
-                        if allow_reference and label in {
-                            "Claude plugin root",
-                            "Claude manifest path",
-                            "Claude executable",
-                        }:
-                            continue
                         fail(
                             f"{path.relative_to(ROOT)}:{line_number}: native runtime "
                             f"file contains forbidden {label}"
                         )
+    for reviewer_root in ROOT.glob("plugins/*/reviewers"):
+        if reviewer_root.exists():
+            fail(
+                f"{reviewer_root.relative_to(ROOT)}: external reviewer code is "
+                "fail-closed until its read-only prepared-scope validator is implemented"
+            )
 
 
 def validate_docs(upstream_state: dict[str, Any] | None) -> None:
