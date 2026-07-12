@@ -28,14 +28,20 @@ Run the deterministic foundation check after structural changes:
 
 ```bash
 python3 scripts/check-structure.py
+python3 -m unittest tests/test_check_structure.py -v
 ```
 
-Validate every Codex and Grok manifest when changing plugin metadata:
+Validate Grok manifests with its native validator when changing plugin
+metadata:
 
 ```bash
-python3 /path/to/plugin-creator/scripts/validate_plugin.py plugins/<plugin>
 grok plugin validate plugins/<plugin>
 ```
+
+The repository structure check validates the Codex manifest contract and
+marketplace relationships. For ingestion-sensitive Codex changes, also
+register the checkout in an isolated `CODEX_HOME` and confirm that
+`codex plugin marketplace list --json` discovers `gering-agent-plugins`.
 
 Do not run deployment commands or mutating fixture tests against external
 projects. The initial `muellmann-app.de` fixture is read-only.

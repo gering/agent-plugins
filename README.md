@@ -73,10 +73,12 @@ details.
 
 ```bash
 python3 scripts/check-structure.py
+python3 -m unittest tests/test_check_structure.py -v
 ```
 
 This check validates manifests, marketplace relationships, upstream state,
-parity coverage, and forbidden Claude-only references in native adapters.
+parity coverage, and forbidden Claude-only references in native adapters. The
+regression suite verifies that known-invalid states are rejected.
 
 ## Design and migration
 
