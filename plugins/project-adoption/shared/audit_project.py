@@ -7,8 +7,10 @@ import argparse
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,9 @@ from typing import Any
 SIGNATURES_PATH = Path(__file__).with_name("signatures.json")
 MAX_FILE_SIZE = 256 * 1024
 MAX_EVIDENCE_PER_PATTERN = 20
+MAX_ENABLED_PLUGINS = 100
+MAX_PLUGIN_ID_LENGTH = 256
+GIT_TIMEOUT_SECONDS = 10
 SKIPPED_PARTS = {
     ".git",
     ".worktrees",
@@ -56,34 +61,173 @@ SKIPPED_SUFFIXES = {
 WORKFLOW_PLUGIN_NAMES = ("knowledge-system", "pr-flow", "work-system")
 
 
-def run_git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    environment = os.environ.copy()
-    environment["GIT_CONFIG_GLOBAL"] = os.devnull
-    environment["GIT_CONFIG_NOSYSTEM"] = "1"
-    environment["GIT_OPTIONAL_LOCKS"] = "0"
-    environment["GIT_TERMINAL_PROMPT"] = "0"
-    for key in list(environment):
-        if key == "GIT_CONFIG_COUNT" or key.startswith("GIT_CONFIG_KEY_") or key.startswith("GIT_CONFIG_VALUE_"):
-            environment.pop(key)
-    return subprocess.run(
-        [
-            "git",
-            "--no-optional-locks",
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            f"core.hooksPath={os.devnull}",
-            "-c",
-            "submodule.recurse=false",
-            "-C",
-            str(root),
-            *args,
-        ],
-        text=True,
-        capture_output=True,
-        check=False,
-        env=environment,
-    )
+class AuditError(RuntimeError):
+    """The audit could not complete safely and must fail closed."""
+
+
+def _git_directories(root: Path) -> tuple[Path, Path] | None:
+    dot_git = root / ".git"
+    if dot_git.is_symlink():
+        raise AuditError(".git is a symbolic link; refusing to load repository metadata")
+    if dot_git.is_dir():
+        worktree_git_dir = dot_git
+    elif dot_git.is_file():
+        try:
+            marker = dot_git.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise AuditError(f"cannot read .git indirection: {exc}") from exc
+        if not marker.startswith("gitdir: "):
+            raise AuditError("invalid .git indirection")
+        worktree_git_dir = Path(marker[8:])
+        if not worktree_git_dir.is_absolute():
+            worktree_git_dir = dot_git.parent / worktree_git_dir
+        worktree_git_dir = worktree_git_dir.resolve()
+        if not worktree_git_dir.is_dir():
+            raise AuditError(".git indirection does not name a directory")
+    elif dot_git.exists():
+        raise AuditError("unsupported .git metadata type")
+    else:
+        return None
+
+    common_git_dir = worktree_git_dir
+    commondir = worktree_git_dir / "commondir"
+    if commondir.is_file():
+        try:
+            common_git_dir = Path(commondir.read_text(encoding="utf-8").strip())
+        except (OSError, UnicodeDecodeError) as exc:
+            raise AuditError(f"cannot read Git commondir: {exc}") from exc
+        if not common_git_dir.is_absolute():
+            common_git_dir = worktree_git_dir / common_git_dir
+        common_git_dir = common_git_dir.resolve()
+    if not common_git_dir.is_dir() or not (common_git_dir / "objects").is_dir():
+        raise AuditError("Git object directory is missing")
+    return worktree_git_dir, common_git_dir
+
+
+def _read_head(worktree_git_dir: Path, common_git_dir: Path) -> str:
+    head_path = worktree_git_dir / "HEAD"
+    try:
+        head = head_path.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise AuditError(f"cannot read Git HEAD: {exc}") from exc
+    if re.fullmatch(r"[0-9a-fA-F]{40,64}", head):
+        return head.lower()
+    if not head.startswith("ref: refs/") or ".." in Path(head[5:]).parts:
+        raise AuditError("Git HEAD is malformed")
+    reference = head[5:]
+    for base in (worktree_git_dir, common_git_dir):
+        loose = base / reference
+        if loose.is_file() and not loose.is_symlink():
+            try:
+                value = loose.read_text(encoding="ascii").strip()
+            except (OSError, UnicodeDecodeError) as exc:
+                raise AuditError(f"cannot read Git HEAD reference: {exc}") from exc
+            if re.fullmatch(r"[0-9a-fA-F]{40,64}", value):
+                return value.lower()
+            raise AuditError("Git HEAD reference is malformed")
+    packed_refs = common_git_dir / "packed-refs"
+    if packed_refs.is_file() and not packed_refs.is_symlink():
+        try:
+            lines = packed_refs.read_text(encoding="ascii").splitlines()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise AuditError(f"cannot read packed Git references: {exc}") from exc
+        for line in lines:
+            fields = line.split(" ", 1)
+            if len(fields) == 2 and fields[1] == reference and re.fullmatch(
+                r"[0-9a-fA-F]{40,64}", fields[0]
+            ):
+                return fields[0].lower()
+    return head
+
+
+class SafeGit:
+    """Run read-only Git queries without loading any target-controlled config."""
+
+    def __init__(self, root: Path):
+        self.root = root
+        directories = _git_directories(root)
+        self.is_repository = directories is not None
+        self.worktree_count = 0
+        self._temporary: tempfile.TemporaryDirectory[str] | None = None
+        self._environment: dict[str, str] | None = None
+        if directories is None:
+            return
+        self.worktree_git_dir, self.common_git_dir = directories
+        worktrees = self.common_git_dir / "worktrees"
+        linked = (
+            sum(1 for item in worktrees.iterdir() if item.is_dir() and not item.is_symlink())
+            if worktrees.is_dir()
+            else 0
+        )
+        self.worktree_count = linked + 1
+
+    def __enter__(self) -> "SafeGit":
+        if not self.is_repository:
+            return self
+        self._temporary = tempfile.TemporaryDirectory(prefix="agent-adoption-git-")
+        isolated = Path(self._temporary.name)
+        (isolated / "objects").mkdir()
+        (isolated / "refs" / "heads").mkdir(parents=True)
+        (isolated / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+        (isolated / "HEAD").write_text(
+            f"{_read_head(self.worktree_git_dir, self.common_git_dir)}\n", encoding="ascii"
+        )
+        environment = os.environ.copy()
+        for key in list(environment):
+            if key.startswith("GIT_"):
+                environment.pop(key)
+        environment.update(
+            {
+                "GIT_ATTR_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_DIR": str(isolated),
+                "GIT_INDEX_FILE": str(self.worktree_git_dir / "index"),
+                "GIT_OBJECT_DIRECTORY": str(self.common_git_dir / "objects"),
+                "GIT_OPTIONAL_LOCKS": "0",
+                "GIT_TERMINAL_PROMPT": "0",
+                "GIT_WORK_TREE": str(self.root),
+            }
+        )
+        self._environment = environment
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        if self._temporary is not None:
+            self._temporary.cleanup()
+
+    def run(self, *args: str) -> str:
+        if not self.is_repository or self._environment is None:
+            raise AuditError("Git query requested outside an isolated repository context")
+        try:
+            result = subprocess.run(
+                [
+                    "git",
+                    "--no-optional-locks",
+                    "-c",
+                    "core.fsmonitor=false",
+                    "-c",
+                    f"core.hooksPath={os.devnull}",
+                    "-c",
+                    "submodule.recurse=false",
+                    *args,
+                ],
+                cwd=self.root,
+                text=True,
+                capture_output=True,
+                check=False,
+                env=self._environment,
+                timeout=GIT_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise AuditError(f"Git query timed out after {GIT_TIMEOUT_SECONDS} seconds") from exc
+        except OSError as exc:
+            raise AuditError(f"Git query could not start: {exc}") from exc
+        if result.returncode != 0:
+            detail = result.stderr.strip().splitlines()
+            suffix = f": {detail[0]}" if detail else ""
+            raise AuditError(f"Git {' '.join(args)} failed{suffix}")
+        return result.stdout
 
 
 def load_signatures() -> dict[str, Any]:
@@ -93,18 +237,20 @@ def load_signatures() -> dict[str, Any]:
     return data
 
 
-def tracked_files(root: Path, is_git: bool) -> list[Path]:
-    if is_git:
-        result = run_git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
-        if result.returncode == 0:
-            return [root / item for item in result.stdout.split("\0") if item]
+def tracked_files(root: Path, git: SafeGit) -> list[Path]:
+    if git.is_repository:
+        output = git.run("ls-files", "-z", "--cached", "--others", "--exclude-standard")
+        return sorted(
+            (root / item for item in output.split("\0") if item),
+            key=lambda item: item.relative_to(root).as_posix(),
+        )
     candidates: list[Path] = []
     for directory, names, files in os.walk(root, followlinks=False):
-        names[:] = [name for name in names if name not in SKIPPED_PARTS]
+        names[:] = sorted(name for name in names if name not in SKIPPED_PARTS)
         base = Path(directory)
-        candidates.extend(base / name for name in files)
+        candidates.extend(base / name for name in sorted(files))
         candidates.extend(base / name for name in names if (base / name).is_symlink())
-    return candidates
+    return sorted(candidates, key=lambda item: item.relative_to(root).as_posix())
 
 
 def scannable(path: Path, root: Path) -> bool:
@@ -116,9 +262,14 @@ def scannable(path: Path, root: Path) -> bool:
     if path.suffix.lower() in SKIPPED_SUFFIXES:
         return False
     try:
-        return path.is_file() and not path.is_symlink() and path.stat().st_size <= MAX_FILE_SIZE
-    except OSError:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise AuditError(f"cannot inspect {relative.as_posix()}: {exc}") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
         return False
+    if metadata.st_size > MAX_FILE_SIZE:
+        raise AuditError(f"scannable file exceeds {MAX_FILE_SIZE} bytes: {relative.as_posix()}")
+    return True
 
 
 def add_finding(
@@ -174,19 +325,95 @@ def safe_explicit_file(
             "approval-required",
         )
         return False
-    return path.is_file()
+    if not path.exists():
+        return False
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise AuditError(f"cannot inspect explicit input {path.relative_to(root)}: {exc}") from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        raise AuditError(f"explicit input is not a regular file: {path.relative_to(root)}")
+    if metadata.st_size > MAX_FILE_SIZE:
+        raise AuditError(
+            f"explicit input exceeds {MAX_FILE_SIZE} bytes: {path.relative_to(root)}"
+        )
+    return True
+
+
+def read_explicit_text(root: Path, path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise AuditError(f"cannot read explicit input {path.relative_to(root)} as UTF-8: {exc}") from exc
+
+
+def enabled_plugins_from_settings(root: Path, path: Path) -> dict[str, bool]:
+    try:
+        settings = json.loads(read_explicit_text(root, path))
+    except json.JSONDecodeError as exc:
+        raise AuditError(f"invalid runtime settings JSON in {path.relative_to(root)}: {exc}") from exc
+    if not isinstance(settings, dict):
+        raise AuditError(f"runtime settings must be an object: {path.relative_to(root)}")
+    enabled = settings.get("enabledPlugins", {})
+    selectors: dict[str, bool] = {}
+    if isinstance(enabled, dict):
+        items = enabled.items()
+        if any(not isinstance(key, str) or not isinstance(value, bool) for key, value in items):
+            raise AuditError(f"enabledPlugins must map strings to booleans: {path.relative_to(root)}")
+        selectors = dict(enabled)
+    elif isinstance(enabled, list):
+        if any(not isinstance(value, str) for value in enabled):
+            raise AuditError(f"enabledPlugins must contain only strings: {path.relative_to(root)}")
+        selectors = dict.fromkeys(enabled, True)
+    else:
+        raise AuditError(f"enabledPlugins must be an object or array: {path.relative_to(root)}")
+    if len(selectors) > MAX_ENABLED_PLUGINS:
+        raise AuditError(
+            f"enabledPlugins exceeds {MAX_ENABLED_PLUGINS} entries: {path.relative_to(root)}"
+        )
+    for selector in selectors:
+        if not selector or len(selector) > MAX_PLUGIN_ID_LENGTH:
+            raise AuditError(f"invalid enabled plugin identifier in {path.relative_to(root)}")
+    return selectors
+
+
+def ignored_memory_integrations(root: Path, runtime_root: str) -> list[str]:
+    integrations: list[str] = []
+    for relative_root in (Path(runtime_root), Path("scripts")):
+        start = root / relative_root
+        if not start.is_dir() or start.is_symlink():
+            continue
+        for directory, names, files in os.walk(start, followlinks=False):
+            names[:] = sorted(name for name in names if name not in SKIPPED_PARTS)
+            base = Path(directory)
+            for name in names:
+                candidate = base / name
+                relative = candidate.relative_to(root)
+                if candidate.is_symlink() and any(
+                    "memory" in part.lower() for part in relative.parts
+                ):
+                    integrations.append(relative.as_posix())
+            for name in sorted(files):
+                candidate = base / name
+                relative = candidate.relative_to(root)
+                if "memory" in name.lower() and "link" in name.lower():
+                    integrations.append(relative.as_posix())
+    return integrations
 
 
 def audit(root: Path, signatures: dict[str, Any]) -> dict[str, Any]:
+    with SafeGit(root) as git:
+        return audit_in_context(root, signatures, git)
+
+
+def audit_in_context(root: Path, signatures: dict[str, Any], git: SafeGit) -> dict[str, Any]:
     paths = signatures["paths"]
-    is_git = run_git(root, "rev-parse", "--is-inside-work-tree").returncode == 0
+    is_git = git.is_repository
     dirty_count = 0
-    worktree_count = 0
+    worktree_count = git.worktree_count
     if is_git:
-        dirty = run_git(root, "status", "--porcelain")
-        dirty_count = len([line for line in dirty.stdout.splitlines() if line])
-        worktrees = run_git(root, "worktree", "list", "--porcelain")
-        worktree_count = sum(1 for line in worktrees.stdout.splitlines() if line.startswith("worktree "))
+        dirty = git.run("status", "--porcelain", "--untracked-files=all")
+        dirty_count = len([line for line in dirty.splitlines() if line])
 
     findings: list[dict[str, Any]] = []
     inventory: dict[str, Any] = {
@@ -214,36 +441,23 @@ def audit(root: Path, signatures: dict[str, Any]) -> dict[str, Any]:
         )
     elif agent_safe:
         inventory["agentGuidance"] = True
-        try:
-            agent_text = agent_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+        agent_text = read_explicit_text(root, agent_path)
+        matches = [
+            pattern
+            for pattern in signatures["agent_specific_patterns"]
+            if re.search(pattern, agent_text)
+        ]
+        if matches:
             add_finding(
                 findings,
-                "agents-guidance-unreadable",
+                "agents-guidance-runtime-specific",
                 "warning",
                 "guidance",
-                "Shared agent guidance is not readable as UTF-8.",
-                "Review the file encoding before adoption.",
+                "AGENTS.md contains runtime-specific orchestration that may misdirect another agent.",
+                "Separate durable shared rules from runtime-specific launch and session instructions.",
                 [paths["agent_guidance"]],
                 "approval-required",
             )
-        else:
-            matches = [
-                pattern
-                for pattern in signatures["agent_specific_patterns"]
-                if re.search(pattern, agent_text)
-            ]
-            if matches:
-                add_finding(
-                    findings,
-                    "agents-guidance-runtime-specific",
-                    "warning",
-                    "guidance",
-                    "AGENTS.md contains runtime-specific orchestration that may misdirect another agent.",
-                    "Separate durable shared rules from runtime-specific launch and session instructions.",
-                    [paths["agent_guidance"]],
-                    "approval-required",
-                )
 
     if safe_explicit_file(
         root,
@@ -254,12 +468,9 @@ def audit(root: Path, signatures: dict[str, Any]) -> dict[str, Any]:
     ):
         inventory["referenceGuidance"] = True
         imports: list[str] = []
-        try:
-            for number, line in enumerate(reference_path.read_text(encoding="utf-8").splitlines(), 1):
-                if line.lstrip().startswith("@"):
-                    imports.append(f"{paths['reference_guidance']}:{number}")
-        except (OSError, UnicodeDecodeError):
-            imports = []
+        for number, line in enumerate(read_explicit_text(root, reference_path).splitlines(), 1):
+            if line.lstrip().startswith("@"):
+                imports.append(f"{paths['reference_guidance']}:{number}")
         add_finding(
             findings,
             "reference-guidance-present",
@@ -305,48 +516,31 @@ def audit(root: Path, signatures: dict[str, Any]) -> dict[str, Any]:
                 [paths[key]],
             )
 
-    settings_path = root / paths["settings"]
-    if safe_explicit_file(
-        root,
-        settings_path,
-        findings,
-        "runtime-settings-symlink",
-        "Runtime settings",
+    settings_evidence: list[str] = []
+    enabled_state: dict[str, bool] = {}
+    for settings_key, finding_id, label in (
+        ("settings", "runtime-settings-symlink", "Runtime settings"),
+        ("settings_local", "runtime-local-settings-symlink", "Local runtime settings"),
     ):
-        try:
-            settings = json.loads(settings_path.read_text(encoding="utf-8"))
-            enabled = settings.get("enabledPlugins", {}) if isinstance(settings, dict) else {}
-            if isinstance(enabled, dict):
-                inventory["enabledPlugins"] = sorted(
-                    key for key, value in enabled.items() if value is not False
-                )
-            elif isinstance(enabled, list):
-                inventory["enabledPlugins"] = sorted(
-                    value for value in enabled if isinstance(value, str)
-                )
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            add_finding(
-                findings,
-                "runtime-settings-unreadable",
-                "warning",
-                "plugins",
-                "Runtime settings could not be parsed safely.",
-                "Review settings manually; do not rewrite them automatically.",
-                [paths["settings"]],
-                "approval-required",
-            )
-        if inventory["enabledPlugins"]:
-            add_finding(
-                findings,
-                "runtime-plugins-enabled",
-                "info",
-                "plugins",
-                "Reference-runtime plugins are enabled.",
-                "Map their capabilities before changing installation state.",
-                [paths["settings"]],
-            )
+        settings_path = root / paths[settings_key]
+        if safe_explicit_file(root, settings_path, findings, finding_id, label):
+            enabled_state.update(enabled_plugins_from_settings(root, settings_path))
+            settings_evidence.append(paths[settings_key])
+    inventory["enabledPlugins"] = sorted(
+        selector for selector, enabled in enabled_state.items() if enabled
+    )
+    if inventory["enabledPlugins"]:
+        add_finding(
+            findings,
+            "runtime-plugins-enabled",
+            "info",
+            "plugins",
+            "Reference-runtime plugins are enabled.",
+            "Map their capabilities before changing installation state.",
+            settings_evidence,
+        )
 
-    candidates = tracked_files(root, is_git)
+    candidates = tracked_files(root, git)
     memory_integrations: list[str] = []
     for path in candidates:
         relative = path.relative_to(root)
@@ -356,7 +550,8 @@ def audit(root: Path, signatures: dict[str, Any]) -> dict[str, Any]:
         is_link_helper = "memory" in path.name.lower() and "link" in path.name.lower()
         if is_link_helper or (path.is_symlink() and has_memory_name):
             memory_integrations.append(relative.as_posix())
-    memory_integrations = sorted(set(memory_integrations))[:20]
+    memory_integrations.extend(ignored_memory_integrations(root, paths["runtime_root"]))
+    memory_integrations = sorted(set(memory_integrations))[:MAX_EVIDENCE_PER_PATTERN]
     inventory["memoryIntegrationPaths"] = memory_integrations
     if memory_integrations:
         add_finding(
@@ -381,15 +576,15 @@ def audit(root: Path, signatures: dict[str, Any]) -> dict[str, Any]:
             selector == plugin_name or selector.startswith(f"{plugin_name}@")
             for selector in inventory["enabledPlugins"]
         ):
-            evidence.append(paths["settings"])
+            evidence.extend(settings_evidence)
     for path in candidates:
         if not scannable(path, root):
             continue
+        relative = path.relative_to(root).as_posix()
         try:
             text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        relative = path.relative_to(root).as_posix()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise AuditError(f"cannot scan {relative} as UTF-8: {exc}") from exc
         for line_number, line in enumerate(text.splitlines(), 1):
             for pattern_id, _, pattern in compiled:
                 evidence = pattern_evidence[pattern_id]
@@ -488,7 +683,15 @@ def main() -> int:
         return 2
     try:
         report = audit(root, load_signatures())
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+    except (
+        AuditError,
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as exc:
         print(f"AUDIT_ERROR {exc}", file=sys.stderr)
         return 2
     if args.format == "json":

@@ -58,6 +58,22 @@ class StructureCheckTests(unittest.TestCase):
         result = self.run_check()
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_available_project_adoption_skill_requires_valid_frontmatter(self) -> None:
+        skill = self.root / "plugins/project-adoption/skills/adopt-claude-project/SKILL.md"
+        skill.write_text("---\n---\n", encoding="utf-8")
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("frontmatter", result.stderr)
+
+    def test_available_project_adoption_agent_metadata_requires_interface(self) -> None:
+        agent = self.root / (
+            "plugins/project-adoption/skills/adopt-claude-project/agents/openai.yaml"
+        )
+        agent.write_text("interface: {}\n", encoding="utf-8")
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("root must be interface", result.stderr)
+
     def test_available_unfinished_plugin_fails(self) -> None:
         relative = ".agents/plugins/marketplace.json"
         marketplace = self.read_json(relative)

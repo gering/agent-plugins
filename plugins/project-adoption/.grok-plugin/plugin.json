@@ -1,6 +1,6 @@
 {
   "name": "project-adoption",
-  "version": "0.1.0+codex.20260712194554",
+  "version": "0.1.0+codex.20260712213952",
   "description": "Audit an existing Claude-oriented project before adopting Codex or Grok.",
   "author": {
     "name": "gering"

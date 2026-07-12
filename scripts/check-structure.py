@@ -120,6 +120,7 @@ ADOPTION_PATH_KEYS = {
     "reference_guidance",
     "runtime_root",
     "settings",
+    "settings_local",
     "knowledge",
     "rules",
     "legacy_worktrees",
@@ -501,6 +502,62 @@ def validate_project_adoption_slice() -> None:
     for relative in required:
         if not (ROOT / relative).is_file():
             fail(f"project-adoption available slice is missing required file: {relative}")
+
+    skill_relative = "plugins/project-adoption/skills/adopt-claude-project/SKILL.md"
+    skill = load_text(skill_relative)
+    if skill is not None:
+        if not skill.startswith("---\n") or "\n---\n" not in skill[4:]:
+            fail(f"{skill_relative}: missing complete YAML frontmatter")
+        else:
+            frontmatter, body = skill[4:].split("\n---\n", 1)
+            metadata: dict[str, str] = {}
+            for line in frontmatter.splitlines():
+                key, separator, value = line.partition(":")
+                if not separator or not key or key in metadata or not value.strip():
+                    fail(f"{skill_relative}: malformed frontmatter")
+                    continue
+                metadata[key] = value.strip()
+            if set(metadata) != {"name", "description"}:
+                fail(f"{skill_relative}: frontmatter must contain only name and description")
+            if metadata.get("name") != "adopt-claude-project":
+                fail(f"{skill_relative}: skill name must be adopt-claude-project")
+            if not body.strip():
+                fail(f"{skill_relative}: skill instructions must not be empty")
+            if "TODO" in skill:
+                fail(f"{skill_relative}: unresolved TODO marker")
+
+    agent_relative = (
+        "plugins/project-adoption/skills/adopt-claude-project/agents/openai.yaml"
+    )
+    agent = load_text(agent_relative)
+    if agent is not None:
+        lines = agent.splitlines()
+        values: dict[str, str] = {}
+        if not lines or lines[0] != "interface:":
+            fail(f"{agent_relative}: root must be interface")
+        for line in lines[1:]:
+            match = re.fullmatch(r"  ([a-z_]+):\s*(.+)", line)
+            if not match or match.group(1) in values:
+                fail(f"{agent_relative}: malformed interface metadata")
+                continue
+            try:
+                value = json.loads(match.group(2))
+            except json.JSONDecodeError:
+                fail(f"{agent_relative}: interface values must be quoted strings")
+                continue
+            if not isinstance(value, str) or not value.strip():
+                fail(f"{agent_relative}: interface values must be non-empty strings")
+                continue
+            values[match.group(1)] = value
+        if set(values) != {"display_name", "short_description", "default_prompt"}:
+            fail(f"{agent_relative}: interface fields do not match the required schema")
+        short_description = values.get("short_description", "")
+        if short_description and not 25 <= len(short_description) <= 64:
+            fail(f"{agent_relative}: short_description must be 25-64 characters")
+        if "$adopt-claude-project" not in values.get("default_prompt", ""):
+            fail(f"{agent_relative}: default_prompt must mention $adopt-claude-project")
+        if "TODO" in agent:
+            fail(f"{agent_relative}: unresolved TODO marker")
 
 
 def validate_adapter_boundaries() -> None:

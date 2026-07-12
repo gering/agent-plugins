@@ -4,6 +4,7 @@
     "reference_guidance": "CLAUDE.md",
     "runtime_root": ".claude",
     "settings": ".claude/settings.json",
+    "settings_local": ".claude/settings.local.json",
     "knowledge": ".claude/knowledge",
     "rules": ".claude/rules",
     "legacy_worktrees": ".claude/worktrees",
@@ -15,12 +16,12 @@
     {
       "id": "claude-plugin-root",
       "label": "Claude plugin-root variable",
-      "pattern": "\\$(?:\\{CLAUDE_PLUGIN_ROOT\\}|CLAUDE_PLUGIN_ROOT\\b)"
+      "pattern": "(?i)(?:\\$(?:\\{CLAUDE_PLUGIN_ROOT\\}|CLAUDE_PLUGIN_ROOT\\b|env:CLAUDE_PLUGIN_ROOT\\b)|%CLAUDE_PLUGIN_ROOT%)"
     },
     {
       "id": "claude-cli",
       "label": "Claude CLI command",
-      "pattern": "(?i)(?<![A-Za-z0-9_-])(?:[^\\s\\\"'`|;&()]*/)?claude(?:\\.(?:exe|cmd|bat))?(?:\\s+(?:--?[A-Za-z0-9]|resume\\b|continue\\b)|(?=`))"
+      "pattern": "(?i)(?:^|(?:\\b(?:exec|command|nohup)|[;&|])\\s+)(?:[^\\s\\\"'`|;&()]*/)?claude(?:\\.(?:exe|cmd|bat))?(?=\\s*(?:$|[;&|<>()]|[\\\"'$]))|(?<![A-Za-z0-9_-])(?:[^\\s\\\"'`|;&()]*/)?claude(?:\\.(?:exe|cmd|bat))?\\s+(?:--?[A-Za-z0-9]|resume\\b|continue\\b|[\\\"'$<])"
     },
     {
       "id": "claude-workflow-tool",

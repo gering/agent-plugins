@@ -3,12 +3,16 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
@@ -118,11 +122,45 @@ class ProjectAdoptionTests(unittest.TestCase):
                 ids = {finding["id"] for finding in self.report()["findings"]}
                 self.assertIn("agents-guidance-runtime-specific", ids)
 
-    def test_invalid_settings_are_reported_without_failure(self) -> None:
+    def test_invalid_settings_fail_closed(self) -> None:
         self.write("AGENTS.md", "Shared rules.\n")
         self.write(".claude/settings.json", "{not-json\n")
-        ids = {finding["id"] for finding in self.report()["findings"]}
-        self.assertIn("runtime-settings-unreadable", ids)
+        result = self.run_audit()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("AUDIT_ERROR", result.stderr)
+
+    def test_local_settings_are_inventoried_and_override_project_settings(self) -> None:
+        self.write("AGENTS.md", "Shared rules.\n")
+        self.write(
+            ".claude/settings.json",
+            json.dumps({"enabledPlugins": {"disabled@market": True, "base@market": True}}),
+        )
+        self.write(
+            ".claude/settings.local.json",
+            json.dumps({"enabledPlugins": {"disabled@market": False, "local@market": True}}),
+        )
+        self.write(".gitignore", ".claude/settings.local.json\n")
+        report = self.report()
+        self.assertEqual(report["inventory"]["enabledPlugins"], ["base@market", "local@market"])
+        finding = next(item for item in report["findings"] if item["id"] == "runtime-plugins-enabled")
+        self.assertEqual(
+            finding["evidence"],
+            [".claude/settings.json", ".claude/settings.local.json"],
+        )
+
+    def test_explicit_inputs_and_plugin_inventory_are_bounded(self) -> None:
+        self.write("AGENTS.md", "x" * (256 * 1024 + 1))
+        result = self.run_audit()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("exceeds", result.stderr)
+
+        (self.root / "AGENTS.md").unlink()
+        self.write("AGENTS.md", "Shared rules.\n")
+        enabled = {f"plugin-{number}@market": True for number in range(101)}
+        self.write(".claude/settings.json", json.dumps({"enabledPlugins": enabled}))
+        result = self.run_audit()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("enabledPlugins exceeds", result.stderr)
 
     def test_secret_files_are_not_content_scanned(self) -> None:
         self.write("AGENTS.md", "Shared rules.\n")
@@ -141,6 +179,49 @@ class ProjectAdoptionTests(unittest.TestCase):
         result = self.run_audit()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(marker.exists())
+
+    def test_target_configured_clean_filter_is_not_executed(self) -> None:
+        marker = Path(self.tempdir.name) / "clean-filter-ran"
+        self.write("AGENTS.md", "Shared rules.\n")
+        self.write("tracked.txt", "initial\n")
+        self.write(".gitattributes", "tracked.txt filter=probe\n")
+        self.git("config", "filter.probe.clean", f"sh -c 'touch {marker}; cat'")
+        self.git("add", ".")
+        self.git("commit", "-q", "-m", "fixture")
+        marker.unlink(missing_ok=True)
+        self.write("tracked.txt", "changed\n")
+        result = self.run_audit()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(marker.exists())
+
+    def test_target_git_includes_are_not_opened(self) -> None:
+        fifo = Path(self.tempdir.name) / "blocked-config"
+        os.mkfifo(fifo)
+        self.git("config", "include.path", str(fifo))
+        result = self.run_audit()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_malformed_target_git_config_cannot_downgrade_repository(self) -> None:
+        self.write("AGENTS.md", "Shared rules.\n")
+        (self.root / ".git/config").write_text("[broken\n", encoding="utf-8")
+        report = self.report()
+        self.assertTrue(report["inventory"]["gitRepository"])
+        self.assertGreater(report["inventory"]["dirtyPathCount"], 0)
+
+    def test_git_timeout_is_fail_closed(self) -> None:
+        spec = importlib.util.spec_from_file_location("audit_project_timeout_test", AUDITOR)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with module.SafeGit(self.root) as git_context:
+            with mock.patch.object(
+                module.subprocess,
+                "run",
+                side_effect=subprocess.TimeoutExpired("git", module.GIT_TIMEOUT_SECONDS),
+            ):
+                with self.assertRaises(module.AuditError):
+                    git_context.run("status", "--porcelain")
 
     def test_symlinked_settings_outside_target_are_not_read(self) -> None:
         self.write("AGENTS.md", "Shared rules.\n")
@@ -185,6 +266,56 @@ class ProjectAdoptionTests(unittest.TestCase):
         self.write("scripts/link-project-memory.sh", "#!/bin/sh\n")
         integrations = self.report()["inventory"]["memoryIntegrationPaths"]
         self.assertEqual(integrations, ["scripts/link-project-memory.sh"])
+
+    def test_ignored_memory_symlinks_are_inventoried_without_following(self) -> None:
+        self.write("AGENTS.md", "Shared rules.\n")
+        self.write(".gitignore", ".claude/memory/\n")
+        external = Path(self.tempdir.name) / "external-memory"
+        external.mkdir()
+        link = self.root / ".claude/memory/project-link"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(external, target_is_directory=True)
+        self.assertEqual(
+            self.report()["inventory"]["memoryIntegrationPaths"],
+            [".claude/memory/project-link"],
+        )
+
+    def test_bare_cli_and_cross_shell_plugin_root_forms_are_detected(self) -> None:
+        self.write("AGENTS.md", "Shared rules.\n")
+        self.write(
+            "scripts/launch.ps1",
+            "claude\n& claude \"$prompt\"\n$env:CLAUDE_PLUGIN_ROOT\n%CLAUDE_PLUGIN_ROOT%\n",
+        )
+        ids = {finding["id"] for finding in self.report()["findings"]}
+        self.assertIn("hardcoded-claude-cli", ids)
+        self.assertIn("hardcoded-claude-plugin-root", ids)
+
+    def test_claude_code_prose_is_not_a_cli_command(self) -> None:
+        self.write("AGENTS.md", "Shared rules.\n")
+        self.write("docs/reference.md", "This project was originally used with Claude Code.\n")
+        ids = {finding["id"] for finding in self.report()["findings"]}
+        self.assertNotIn("hardcoded-claude-cli", ids)
+
+    def test_unreadable_utf8_candidate_fails_closed(self) -> None:
+        self.write("AGENTS.md", "Shared rules.\n")
+        path = self.root / "tracked.txt"
+        path.write_bytes(b"\xff\xfe")
+        result = self.run_audit()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cannot scan tracked.txt as UTF-8", result.stderr)
+
+    def test_non_git_evidence_order_is_deterministic(self) -> None:
+        shutil.rmtree(self.root / ".git")
+        self.write("AGENTS.md", "Shared rules.\n")
+        self.write("z-last.sh", "claude --resume\n")
+        self.write("a-first.sh", "claude --resume\n")
+        reports = [self.report(), self.report()]
+        evidence = [
+            next(item for item in report["findings"] if item["id"] == "hardcoded-claude-cli")["evidence"]
+            for report in reports
+        ]
+        self.assertEqual(evidence[0], ["a-first.sh:1", "z-last.sh:1"])
+        self.assertEqual(evidence[0], evidence[1])
 
     def test_audit_does_not_change_target_files_or_status(self) -> None:
         self.write("AGENTS.md", "Shared rules.\n")
