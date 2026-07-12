@@ -1,0 +1,8 @@
+{
+  "name": "gering-agent-plugins",
+  "description": "Native Grok plugins for shared Codex and Grok workflows",
+  "owner": {
+    "name": "gering"
+  },
+  "plugins": []
+}

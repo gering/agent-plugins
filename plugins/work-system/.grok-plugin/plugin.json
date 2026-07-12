@@ -1,0 +1,11 @@
+{
+  "name": "work-system",
+  "version": "0.1.0",
+  "description": "Manage tasks, branches, worktrees, and native agent sessions safely.",
+  "author": {
+    "name": "gering"
+  },
+  "repository": "https://github.com/gering/agent-plugins",
+  "license": "MIT",
+  "keywords": ["tasks", "worktrees", "workflow", "grok"]
+}

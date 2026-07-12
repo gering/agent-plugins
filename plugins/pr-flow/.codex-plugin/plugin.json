@@ -1,0 +1,20 @@
+{
+  "name": "pr-flow",
+  "version": "0.1.0",
+  "description": "Run pull-request readiness, review, rebase, and merge safety workflows.",
+  "author": {
+    "name": "gering"
+  },
+  "repository": "https://github.com/gering/agent-plugins",
+  "license": "MIT",
+  "keywords": ["pull-request", "review", "merge", "codex"],
+  "interface": {
+    "displayName": "PR Flow",
+    "shortDescription": "Review and merge pull requests safely.",
+    "longDescription": "Runs readiness, review, rebase, and merge checks while keeping provider-specific review behavior explicit.",
+    "developerName": "gering",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Check whether this branch is ready for a pull request."
+  }
+}
