@@ -13,6 +13,39 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 PLUGINS = ("project-adoption", "knowledge-system", "work-system", "pr-flow")
 ALLOWED_AUTHENTICATION = {"ON_INSTALL", "ON_USE"}
+ALLOWED_MANIFEST_KEYS = {
+    "id",
+    "name",
+    "version",
+    "description",
+    "skills",
+    "apps",
+    "mcpServers",
+    "interface",
+    "author",
+    "homepage",
+    "repository",
+    "license",
+    "keywords",
+}
+ALLOWED_INTERFACE_KEYS = {
+    "displayName",
+    "shortDescription",
+    "longDescription",
+    "developerName",
+    "category",
+    "capabilities",
+    "websiteURL",
+    "privacyPolicyURL",
+    "termsOfServiceURL",
+    "brandColor",
+    "composerIcon",
+    "logo",
+    "logoDark",
+    "screenshots",
+    "defaultPrompt",
+    "default_prompt",
+}
 ALLOWED_PARITY_STATES = {
     "missing",
     "planned",
@@ -29,15 +62,19 @@ SEMVER = re.compile(
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
 )
 FORBIDDEN_ADAPTER_PATTERNS = (
-    ("Claude plugin root", re.compile(r"\$\{CLAUDE_PLUGIN_ROOT\}")),
-    ("Claude manifest path", re.compile(r"\.claude-plugin")),
     (
-        "Claude session command",
-        re.compile(r"(?<![\w-])claude\s+(?:--continue|--resume|--print|-c\b|-r\b|-p\b)"),
+        "Claude plugin root",
+        re.compile(r"\$(?:\{CLAUDE_PLUGIN_ROOT\}|CLAUDE_PLUGIN_ROOT\b)"),
     ),
-    ("Claude Workflow tool", re.compile(r"\bWorkflow\s*\(")),
-    ("Claude slash-command tool", re.compile(r"\bSlashCommand\s*\(")),
+    ("Claude manifest path", re.compile(r"\.claude-plugin")),
+    ("Claude executable", re.compile(r"(?<![\w./-])claude(?=\s|$)")),
+    ("Claude Workflow tool", re.compile(r"\bWorkflow(?:\s+tool|\s*\()")),
+    (
+        "Claude slash-command tool",
+        re.compile(r"\bSlashCommand(?:\s+tool|\s*\()"),
+    ),
 )
+CLAUDE_REFERENCE_ALLOW_MARKER = "agent-plugins: allow-claude-reference"
 
 errors: list[str] = []
 
@@ -46,16 +83,29 @@ def fail(message: str) -> None:
     errors.append(message)
 
 
-def load_json(relative: str) -> Any | None:
+def load_json(relative: str) -> dict[str, Any] | None:
     path = ROOT / relative
     if not path.is_file():
         fail(f"missing required file: {relative}")
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         fail(f"invalid JSON in {relative}: {exc}")
         return None
+    if not isinstance(data, dict):
+        fail(f"invalid JSON in {relative}: root must be an object")
+        return None
+    return data
+
+
+def require_non_empty_string(
+    payload: dict[str, Any], key: str, relative: str, *, prefix: str = ""
+) -> None:
+    value = payload.get(key)
+    field = f"{prefix}.{key}" if prefix else key
+    if not isinstance(value, str) or not value.strip():
+        fail(f"{relative}: {field} must be a non-empty string")
 
 
 def validate_manifest(plugin: str, runtime: str) -> dict[str, Any] | None:
@@ -63,18 +113,46 @@ def validate_manifest(plugin: str, runtime: str) -> dict[str, Any] | None:
     data = load_json(relative)
     if not isinstance(data, dict):
         return None
+    if runtime == "codex":
+        for key in sorted(set(data) - ALLOWED_MANIFEST_KEYS):
+            fail(f"{relative}: unsupported Codex manifest field {key!r}")
     if data.get("name") != plugin:
         fail(f"{relative}: name must equal plugin directory {plugin!r}")
     version = data.get("version")
     if not isinstance(version, str) or not SEMVER.fullmatch(version):
         fail(f"{relative}: version must be strict semver")
-    if not isinstance(data.get("description"), str) or not data["description"].strip():
-        fail(f"{relative}: description is required")
+    require_non_empty_string(data, "description", relative)
     author = data.get("author")
-    if not isinstance(author, dict) or not isinstance(author.get("name"), str):
-        fail(f"{relative}: author.name is required")
+    if not isinstance(author, dict):
+        fail(f"{relative}: author must be an object")
+    else:
+        for key in sorted(set(author) - {"name", "email", "url"}):
+            fail(f"{relative}: unsupported author field {key!r}")
+        require_non_empty_string(author, "name", relative, prefix="author")
     if data.get("license") != "MIT":
         fail(f"{relative}: license must be MIT")
+    if runtime == "codex":
+        interface = data.get("interface")
+        if not isinstance(interface, dict):
+            fail(f"{relative}: interface must be an object")
+        else:
+            for key in sorted(set(interface) - ALLOWED_INTERFACE_KEYS):
+                fail(f"{relative}: unsupported interface field {key!r}")
+            for field in (
+                "displayName",
+                "shortDescription",
+                "longDescription",
+                "developerName",
+                "category",
+            ):
+                require_non_empty_string(interface, field, relative, prefix="interface")
+            if "defaultPrompt" not in interface and "default_prompt" not in interface:
+                fail(f"{relative}: interface.defaultPrompt is required")
+            capabilities = interface.get("capabilities")
+            if not isinstance(capabilities, list) or any(
+                not isinstance(item, str) or not item.strip() for item in capabilities
+            ):
+                fail(f"{relative}: interface.capabilities must be strings")
     return data
 
 
@@ -203,7 +281,15 @@ def validate_adapter_boundaries() -> None:
             adapter = ROOT / "plugins" / plugin / runtime
             if adapter.exists():
                 candidates.extend(path for path in adapter.rglob("*") if path.is_file())
-        for component in ("skills", "agents", "commands", "hooks"):
+        for component in (
+            "shared",
+            "skills",
+            "agents",
+            "commands",
+            "hooks",
+            "scripts",
+            "workflows",
+        ):
             root_component = ROOT / "plugins" / plugin / component
             if root_component.exists():
                 candidates.extend(
@@ -216,12 +302,15 @@ def validate_adapter_boundaries() -> None:
                 text = path.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 continue
-            for label, pattern in FORBIDDEN_ADAPTER_PATTERNS:
-                if pattern.search(text):
-                    fail(
-                        f"{path.relative_to(ROOT)}: native runtime file contains "
-                        f"forbidden {label}"
-                    )
+            for line_number, line in enumerate(text.splitlines(), start=1):
+                if CLAUDE_REFERENCE_ALLOW_MARKER in line:
+                    continue
+                for label, pattern in FORBIDDEN_ADAPTER_PATTERNS:
+                    if pattern.search(line):
+                        fail(
+                            f"{path.relative_to(ROOT)}:{line_number}: native runtime "
+                            f"file contains forbidden {label}"
+                        )
 
 
 def validate_docs(upstream_state: dict[str, Any] | None) -> None:
@@ -244,6 +333,12 @@ def validate_docs(upstream_state: dict[str, Any] | None) -> None:
         return
     parity = parity_path.read_text(encoding="utf-8")
     readme = readme_path.read_text(encoding="utf-8")
+    license_path = ROOT / "LICENSE"
+    license_text = (
+        license_path.read_text(encoding="utf-8") if license_path.is_file() else ""
+    )
+    if "MIT License" not in license_text:
+        fail("LICENSE: MIT manifests require the MIT license text")
     rows: dict[str, list[str]] = {}
     for line in parity.splitlines():
         columns = [column.strip() for column in line.split("|")[1:-1]]
@@ -269,30 +364,43 @@ def validate_docs(upstream_state: dict[str, Any] | None) -> None:
     commit = upstream.get("last_reviewed_commit")
     date = upstream.get("last_reviewed_date")
     if isinstance(commit, str):
-        for relative, text in (("docs/parity.md", parity), ("README.md", readme)):
-            if commit not in text:
-                fail(f"{relative}: missing reviewed upstream commit {commit}")
+        if f"- Last reviewed commit: `{commit}`" not in parity:
+            fail(f"docs/parity.md: baseline commit must equal upstream state {commit}")
+        if f"- Reviewed commit: `{commit}`" not in readme:
+            fail(f"README.md: reviewed commit must equal upstream state {commit}")
     if isinstance(date, str):
-        for relative, text in (("docs/parity.md", parity), ("README.md", readme)):
-            if date not in text:
-                fail(f"{relative}: missing reviewed upstream date {date}")
+        if f"- Last sync review: {date}" not in parity:
+            fail(f"docs/parity.md: baseline date must equal upstream state {date}")
+        if f"- Review date: {date}" not in readme:
+            fail(f"README.md: review date must equal upstream state {date}")
     plugin_state = upstream_state.get("plugins", {})
     for plugin in PLUGINS:
         state = plugin_state.get(plugin, {}) if isinstance(plugin_state, dict) else {}
         version = state.get("source_version") if isinstance(state, dict) else None
-        if version is not None:
-            row = rows.get(plugin, [])
-            if not row or version not in row[1]:
+        row = rows.get(plugin, [])
+        if row and isinstance(commit, str) and isinstance(date, str):
+            expected_sync = f"{date} / `{commit[:7]}`"
+            if row[4] != expected_sync:
+                fail(f"docs/parity.md: {plugin} Last sync must be {expected_sync}")
+        if version is not None and isinstance(commit, str):
+            expected_source = f"{version} at `{commit[:7]}`"
+            if not row or row[1] != expected_source:
                 fail(f"docs/parity.md: {plugin} source version must match upstream state")
             if version not in readme:
                 fail(f"README.md: missing tracked source version {plugin} {version}")
 
-    license_path = ROOT / "LICENSE"
-    license_text = (
-        license_path.read_text(encoding="utf-8") if license_path.is_file() else ""
-    )
-    if "MIT License" not in license_text:
-        fail("LICENSE: MIT manifests require the MIT license text")
+    readme_rows: dict[str, list[str]] = {}
+    for line in readme.splitlines():
+        columns = [column.strip() for column in line.split("|")[1:-1]]
+        if columns and columns[0] in PLUGINS:
+            readme_rows[columns[0]] = columns
+    for plugin in PLUGINS:
+        parity_row = rows.get(plugin, [])
+        readme_row = readme_rows.get(plugin, [])
+        if len(readme_row) != 3:
+            fail(f"README.md: missing three-field plugin status row for {plugin}")
+        elif parity_row and readme_row[1:3] != parity_row[2:4]:
+            fail(f"README.md: {plugin} statuses must match docs/parity.md")
 
 
 def main() -> int:

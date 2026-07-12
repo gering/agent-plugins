@@ -12,6 +12,9 @@ not a runtime distributed here.
   manifest, installation, and tool behavior in the relevant runtime adapter.
 - Do not use `${CLAUDE_PLUGIN_ROOT}`, Claude-only tool names, or Claude session
   commands in Codex or Grok adapters.
+- Detection-only references needed by migration audits must carry
+  `agent-plugins: allow-claude-reference` on the same line. The marker never
+  permits executing or depending on the referenced Claude runtime surface.
 - Do not edit the sibling `claude-plugins` checkout from this repository.
 - Treat a dirty upstream Claude worktree as excluded unless the user explicitly
   authorizes importing uncommitted changes.

@@ -83,7 +83,7 @@ class StructureCheckTests(unittest.TestCase):
         self.write_json(relative, state)
         result = self.run_check()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("missing reviewed upstream commit", result.stderr)
+        self.assertIn("baseline commit must equal upstream state", result.stderr)
 
     def test_valid_prerelease_and_build_semver_passes(self) -> None:
         self.set_all_manifest_versions("1.2.3-rc.1+build.45")
@@ -108,7 +108,102 @@ class StructureCheckTests(unittest.TestCase):
         skill.write_text("Run claude -r to continue.\n", encoding="utf-8")
         result = self.run_check()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("forbidden Claude session command", result.stderr)
+        self.assertIn("forbidden Claude executable", result.stderr)
+
+    def test_plain_claude_launch_in_native_adapter_fails(self) -> None:
+        script = self.root / "plugins/work-system/grok/scripts/launch.sh"
+        script.parent.mkdir(parents=True)
+        script.write_text("exec claude\n", encoding="utf-8")
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("forbidden Claude executable", result.stderr)
+
+    def test_unbraced_plugin_root_in_shared_helper_fails(self) -> None:
+        script = self.root / "plugins/work-system/shared/launch.sh"
+        script.parent.mkdir(parents=True)
+        script.write_text('cd "$CLAUDE_PLUGIN_ROOT"\n', encoding="utf-8")
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("forbidden Claude plugin root", result.stderr)
+
+    def test_detection_only_claude_reference_can_be_marked(self) -> None:
+        skill = self.root / "plugins/project-adoption/codex/skills/audit/SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text(
+            "Detect `${CLAUDE_PLUGIN_ROOT}`. "
+            "<!-- agent-plugins: allow-claude-reference -->\n",
+            encoding="utf-8",
+        )
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_null_json_root_fails(self) -> None:
+        (self.root / ".agents/upstream/claude-plugins.json").write_text(
+            "null\n", encoding="utf-8"
+        )
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("root must be an object", result.stderr)
+
+    def test_invalid_utf8_json_fails_without_traceback(self) -> None:
+        (self.root / ".agents/plugins/marketplace.json").write_bytes(b"\xff")
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid JSON", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_missing_codex_interface_fails(self) -> None:
+        relative = "plugins/project-adoption/.codex-plugin/plugin.json"
+        manifest = self.read_json(relative)
+        del manifest["interface"]
+        self.write_json(relative, manifest)
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("interface must be an object", result.stderr)
+
+    def test_unknown_codex_manifest_field_fails(self) -> None:
+        relative = "plugins/project-adoption/.codex-plugin/plugin.json"
+        manifest = self.read_json(relative)
+        manifest["unknown"] = True
+        self.write_json(relative, manifest)
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsupported Codex manifest field", result.stderr)
+
+    def test_stale_parity_last_sync_fails(self) -> None:
+        parity_path = self.root / "docs/parity.md"
+        parity = parity_path.read_text(encoding="utf-8")
+        parity = parity.replace(
+            "| knowledge-system | 1.8.2 at `f443fbb` | planned | planned | "
+            "2026-07-12 / `f443fbb` |",
+            "| knowledge-system | 1.8.2 at `f443fbb` | planned | planned | "
+            "2026-07-11 / `deadbee` |",
+        )
+        parity_path.write_text(parity, encoding="utf-8")
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("knowledge-system Last sync", result.stderr)
+
+    def test_readme_status_must_match_parity(self) -> None:
+        readme_path = self.root / "README.md"
+        readme = readme_path.read_text(encoding="utf-8")
+        readme = readme.replace(
+            "| project-adoption | planned | planned |",
+            "| project-adoption | partial | planned |",
+        )
+        readme_path.write_text(readme, encoding="utf-8")
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("statuses must match docs/parity.md", result.stderr)
+
+    def test_license_text_is_checked_when_upstream_is_invalid(self) -> None:
+        (self.root / ".agents/upstream/claude-plugins.json").write_text(
+            "null\n", encoding="utf-8"
+        )
+        (self.root / "LICENSE").write_text("PROPRIETARY\n", encoding="utf-8")
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("MIT manifests require the MIT license text", result.stderr)
 
 
 if __name__ == "__main__":
