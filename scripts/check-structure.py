@@ -84,7 +84,8 @@ FORBIDDEN_ADAPTER_PATTERNS = (
         "Claude executable",
         re.compile(
             r"(?<![A-Za-z0-9_-])(?:[^\s\"'`|;&()]*/)?claude"
-            r"(?:(?:\.(?:exe|cmd|bat))(?![A-Za-z0-9_.-])|(?![A-Za-z0-9_.-]))"
+            r"(?:(?:\.(?:exe|cmd|bat))(?![A-Za-z0-9_.-])|(?![A-Za-z0-9_.-]))",
+            re.IGNORECASE,
         ),
     ),
     ("Claude Workflow tool", re.compile(r"\bWorkflow(?:\s+tool|\s*\()")),

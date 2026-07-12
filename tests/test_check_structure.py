@@ -229,6 +229,14 @@ class StructureCheckTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("forbidden Claude executable", result.stderr)
 
+    def test_mixed_case_windows_claude_executable_fails(self) -> None:
+        script = self.root / "plugins/work-system/shared/bad.ps1"
+        script.parent.mkdir(parents=True)
+        script.write_text("CLAUDE.ExE --resume\n", encoding="utf-8")
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("forbidden Claude executable", result.stderr)
+
     def test_unicode_semver_digit_fails(self) -> None:
         self.set_all_manifest_versions("1١.2.3")
         result = self.run_check()
