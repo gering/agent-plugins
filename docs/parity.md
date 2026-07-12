@@ -16,12 +16,13 @@ scaffolding alone does not qualify.
 Claude PR
 [`#25`](https://github.com/gering/claude-plugins/pull/25) advances `swarm` to
 0.3.0 with opt-in `--fix`, `--loop`, and deepest-effort review behavior. Its
-committed branch head `fee6bc3d58c05f4d855b172221986cad66c25b6b` was inspected
+committed branch head `3fdf817f576a44ef1a4553dfee5b6815a7dabe55` was inspected
 on 2026-07-12, but it is not the tracked baseline and has not been imported.
-Two additional uncommitted worktree changes were explicitly excluded. After
-the PR merges, review the resulting upstream `main` commit before updating this
-ledger or `.agents/upstream/claude-plugins.json`. The planned native mapping is
-tracked in `tasks/port-swarm-p5.md` and `tasks/add-opus-to-swarm.md`.
+Changes first observed while uncommitted were excluded until they became part
+of that committed head. After the PR merges, review the resulting upstream
+`main` commit before updating this ledger or
+`.agents/upstream/claude-plugins.json`. The planned native mapping is tracked
+in `tasks/port-swarm-p5.md` and `tasks/add-opus-to-swarm.md`.
 
 Allowed states are `missing`, `planned`, `partial`, `parity`, and
 `intentional-divergence`.

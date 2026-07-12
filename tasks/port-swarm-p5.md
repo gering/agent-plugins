@@ -9,11 +9,12 @@ assumptions.
 ## Upstream reference
 
 - Pending source PR: `gering/claude-plugins#25`
-- Reviewed committed branch head: `fee6bc3d58c05f4d855b172221986cad66c25b6b`
+- Reviewed committed branch head: `3fdf817f576a44ef1a4553dfee5b6815a7dabe55`
 - Source plugin version: 0.3.0
 - Review date: 2026-07-12
-- Two uncommitted worktree changes in `plugins/swarm/skills/review/SKILL.md`
-  and `scripts/check-structure.py` were observed and explicitly excluded.
+- The worktree was clean at this reviewed head. Two changes initially observed
+  as uncommitted were excluded until they became commit `3fdf817`; only then
+  were they reviewed here.
 
 Do not update the tracked upstream baseline or claim an import until the PR is
 merged and its resulting `main` commit is reviewed.
@@ -84,4 +85,4 @@ merged and its resulting `main` commit is reviewed.
 - Shipping Claude Code as a runtime from this repository.
 - Copying `${CLAUDE_PLUGIN_ROOT}`, Claude Workflow tool calls, or Claude
   in-session edit ownership into native adapters.
-- Importing the dirty Claude worktree observed during the pre-merge review.
+- Importing any dirty Claude worktree observed during a pre-merge review.
