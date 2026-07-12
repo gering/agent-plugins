@@ -221,7 +221,11 @@ Optional external reviewer families are a separate boundary under
 read-only, receive an explicit prepared scope, and must degrade cleanly when
 their CLI or authentication is unavailable. For example, a future Opus voice
 may use `reviewers/anthropic/`; Claude CLI calls must not appear in `shared/`,
-`codex/`, or `grok/`.
+`codex/`, or `grok/`. Such a reviewer owns only backend invocation and bounded
+result translation; shared orchestration owns scope preparation, schema
+validation, secret redaction, and consensus. Reviewer code remains fail-closed
+until deterministic tests prove prepared-scope isolation, read-only behavior,
+unavailable/error handling, and malformed-output rejection.
 
 ## Knowledge and memory
 

@@ -8,16 +8,17 @@ assumptions.
 
 ## Upstream reference
 
-- Pending source PR: `gering/claude-plugins#25`
-- Reviewed committed branch head: `3fdf817f576a44ef1a4553dfee5b6815a7dabe55`
+- Merged source PR: `gering/claude-plugins#25`
+- Reviewed upstream main commit: `ee7bb2db650fb790530c7310be4b317a3e49bb56`
 - Source plugin version: 0.3.0
 - Review date: 2026-07-12
-- The worktree was clean at this reviewed head. Two changes initially observed
-  as uncommitted were excluded until they became commit `3fdf817`; only then
-  were they reviewed here.
+- The merged commit was inspected from the committed `origin/main` ref while
+  dirty sibling paths remained excluded. Two changes initially observed as
+  uncommitted were excluded until they became commit `3fdf817`; only then were
+  they reviewed here.
 
-Do not update the tracked upstream baseline or claim an import until the PR is
-merged and its resulting `main` commit is reviewed.
+The merged upstream commit is reviewed and tracked. No implementation has been
+imported; porting still requires the native adapter and validation work below.
 
 ## Required semantics
 
@@ -69,7 +70,7 @@ merged and its resulting `main` commit is reviewed.
 
 - `tasks/add-opus-to-swarm.md`
 - Stable project-adoption, knowledge-system, work-system, and PR-flow ports
-- A merged and reviewed upstream PR #25 commit
+- Reviewed upstream merge commit `ee7bb2d`
 
 ## Validation
 

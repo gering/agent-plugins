@@ -34,12 +34,14 @@ Run the deterministic foundation check after structural changes:
 
 ```bash
 python3 scripts/check-structure.py
-python3 -m unittest tests/test_check_structure.py -v
+python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-Run `python3 scripts/check-upstream.py` for a read-only sibling audit. Exit 1
-means a newer committed upstream exists and requires review; dirty paths are
-reported separately and remain excluded.
+Run `python3 scripts/check-upstream.py` for a read-only sibling audit of the
+locally cached `origin/main` ref. Exit 1 means that ref differs from the
+recorded review or observation and requires review; dirty paths are reported
+separately and remain excluded. Refresh remote refs separately when network
+freshness is required.
 
 Validate Grok manifests with its native validator when changing plugin
 metadata:

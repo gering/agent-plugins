@@ -13,13 +13,14 @@ See the [parity ledger](docs/parity.md) for the detailed status.
 ## Tracked upstream
 
 - Repository: `gering/claude-plugins`
-- Reviewed commit: `f443fbb24fbcc06853de666a3737fbebe3064f1f`
+- Reviewed commit: `ee7bb2db650fb790530c7310be4b317a3e49bb56`
 - Review date: 2026-07-12
 - Upstream versions: knowledge-system 1.8.2, work-system 1.6.0,
-  pr-flow 1.2.2
+  pr-flow 1.2.2, swarm 0.3.0
 - Uncommitted upstream changes were detected and explicitly excluded.
-- A newer, not-yet-reviewed upstream `main` commit is recorded in the state
-  file; use `python3 scripts/check-upstream.py` to inspect drift.
+- The merged swarm 0.3.0 upstream was reviewed without importing dirty files.
+  Use `python3 scripts/check-upstream.py` to compare the recorded state with
+  the locally cached upstream `origin/main` ref.
 
 ## Plugin status
 
@@ -75,8 +76,8 @@ details.
 
 ```bash
 python3 scripts/check-structure.py
-python3 -m unittest tests/test_check_structure.py -v
-python3 scripts/check-upstream.py  # exits 1 when newer committed upstream exists
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+python3 scripts/check-upstream.py  # exits 1 when cached upstream state differs
 ```
 
 This check validates manifests, marketplace relationships, upstream state,

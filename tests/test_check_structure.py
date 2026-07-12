@@ -102,6 +102,12 @@ class StructureCheckTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("missing required file: LICENSE", result.stderr)
 
+    def test_missing_gitignore_fails(self) -> None:
+        (self.root / ".gitignore").unlink()
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing required file: .gitignore", result.stderr)
+
     def test_claude_session_command_in_native_adapter_fails(self) -> None:
         skill = self.root / "plugins/project-adoption/codex/skills/audit/SKILL.md"
         skill.parent.mkdir(parents=True)
@@ -163,7 +169,7 @@ class StructureCheckTests(unittest.TestCase):
         parity_path = self.root / "docs/parity.md"
         parity = parity_path.read_text(encoding="utf-8")
         parity = parity.replace(
-            "2026-07-12 / `f443fbb24fbcc06853de666a3737fbebe3064f1f` | "
+            "2026-07-12 / `ee7bb2db650fb790530c7310be4b317a3e49bb56` | "
             "Native memories",
             "2026-07-11 / `deadbeefdeadbeefdeadbeefdeadbeefdeadbeef` | "
             "Native memories",
@@ -233,6 +239,14 @@ class StructureCheckTests(unittest.TestCase):
         script = self.root / "plugins/work-system/shared/bad.ps1"
         script.parent.mkdir(parents=True)
         script.write_text("CLAUDE.ExE --resume\n", encoding="utf-8")
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("forbidden Claude executable", result.stderr)
+
+    def test_mixed_case_plain_claude_executable_fails(self) -> None:
+        script = self.root / "plugins/work-system/grok/scripts/launch.ps1"
+        script.parent.mkdir(parents=True)
+        script.write_text("CLAUDE --resume\n", encoding="utf-8")
         result = self.run_check()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("forbidden Claude executable", result.stderr)
@@ -330,6 +344,110 @@ class StructureCheckTests(unittest.TestCase):
         result = self.run_check()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("external reviewer code is fail-closed", result.stderr)
+
+    def test_invalid_utf8_runtime_file_fails_closed(self) -> None:
+        script = self.root / "plugins/work-system/lib/launch.sh"
+        script.parent.mkdir(parents=True)
+        script.write_bytes(b"exec claude --resume\n#\xff\n")
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unreadable runtime file", result.stderr)
+
+    def test_unlisted_plugin_directory_is_boundary_checked(self) -> None:
+        script = self.root / "plugins/work-system/lib/launch.sh"
+        script.parent.mkdir(parents=True)
+        script.write_text("claude --resume\n", encoding="utf-8")
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("forbidden Claude executable", result.stderr)
+
+    def test_fixture_named_runtime_directory_is_boundary_checked(self) -> None:
+        script = self.root / "plugins/work-system/scripts/fixtures/launch.sh"
+        script.parent.mkdir(parents=True)
+        script.write_text("claude --resume\n", encoding="utf-8")
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("forbidden Claude executable", result.stderr)
+
+    def test_root_mcp_manifest_is_boundary_checked(self) -> None:
+        relative = "plugins/work-system/.codex-plugin/plugin.json"
+        manifest = self.read_json(relative)
+        manifest["mcpServers"] = "./.mcp.json"
+        self.write_json(relative, manifest)
+        (self.root / "plugins/work-system/.mcp.json").write_text(
+            '{"command":"claude --resume"}\n', encoding="utf-8"
+        )
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("forbidden Claude executable", result.stderr)
+
+    def test_inline_mcp_config_is_boundary_checked(self) -> None:
+        relative = "plugins/work-system/.codex-plugin/plugin.json"
+        manifest = self.read_json(relative)
+        manifest["mcpServers"] = {
+            "reviewer": {"command": "claude", "args": ["--resume"]}
+        }
+        self.write_json(relative, manifest)
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("inline MCP config contains forbidden Claude executable", result.stderr)
+
+    def test_declared_component_must_exist(self) -> None:
+        relative = "plugins/work-system/.codex-plugin/plugin.json"
+        manifest = self.read_json(relative)
+        manifest["skills"] = "./skills/"
+        self.write_json(relative, manifest)
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("declared skills directory does not exist", result.stderr)
+
+    def test_claude_prose_is_not_an_executable(self) -> None:
+        skill = self.root / "plugins/project-adoption/codex/skills/audit/SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text(
+            "Audit existing Claude Code projects.\nReview Workflow (read-only).\n",
+            encoding="utf-8",
+        )
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_crlf_mit_license_is_accepted(self) -> None:
+        license_path = self.root / "LICENSE"
+        license_text = license_path.read_text(encoding="utf-8")
+        license_path.write_bytes(license_text.replace("\n", "\r\n").encode("utf-8"))
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_swarm_source_version_must_match_upstream_state(self) -> None:
+        parity_path = self.root / "docs/parity.md"
+        parity = parity_path.read_text(encoding="utf-8").replace(
+            "| swarm | 0.3.0 at `", "| swarm | 0.2.0 at `"
+        )
+        parity_path.write_text(parity, encoding="utf-8")
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("swarm source version must match upstream state", result.stderr)
+
+    def test_swarm_last_sync_must_match_upstream_state(self) -> None:
+        parity_path = self.root / "docs/parity.md"
+        parity = parity_path.read_text(encoding="utf-8").replace(
+            "| swarm | 0.3.0 at `ee7bb2db650fb790530c7310be4b317a3e49bb56` | missing | missing | 2026-07-12 / `ee7bb2db650fb790530c7310be4b317a3e49bb56` |",
+            "| swarm | 0.3.0 at `ee7bb2db650fb790530c7310be4b317a3e49bb56` | missing | missing | 2026-07-11 / `deadbeefdeadbeefdeadbeefdeadbeefdeadbeef` |",
+        )
+        parity_path.write_text(parity, encoding="utf-8")
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("swarm Last sync must be", result.stderr)
+
+    def test_readme_must_include_swarm_source_version(self) -> None:
+        readme_path = self.root / "README.md"
+        readme = readme_path.read_text(encoding="utf-8").replace(
+            ", swarm 0.3.0", ""
+        )
+        readme_path.write_text(readme, encoding="utf-8")
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing tracked source version swarm 0.3.0", result.stderr)
 
 
 if __name__ == "__main__":

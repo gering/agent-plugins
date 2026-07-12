@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGINS = ("project-adoption", "knowledge-system", "work-system", "pr-flow")
+UPSTREAM_PLUGINS = (*PLUGINS, "swarm")
 ALLOWED_AUTHENTICATION = {"ON_INSTALL", "ON_USE"}
 ALLOWED_MANIFEST_KEYS = {
     "id",
@@ -74,7 +75,7 @@ SEMVER = re.compile(
     r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?"
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
 )
-FORBIDDEN_ADAPTER_PATTERNS = (
+FORBIDDEN_REFERENCE_PATTERNS = (
     (
         "Claude plugin root",
         re.compile(r"\$(?:\{CLAUDE_PLUGIN_ROOT\}|CLAUDE_PLUGIN_ROOT\b)"),
@@ -83,17 +84,25 @@ FORBIDDEN_ADAPTER_PATTERNS = (
     (
         "Claude executable",
         re.compile(
-            r"(?<![A-Za-z0-9_-])(?:[^\s\"'`|;&()]*/)?claude"
-            r"(?:(?:\.(?:exe|cmd|bat))(?![A-Za-z0-9_.-])|(?![A-Za-z0-9_.-]))",
+            r"(?<![A-Za-z0-9_-])(?:[^\s\"'`|;&()]*/)?"
+            r"claude(?:\.(?:exe|cmd|bat))?(?![A-Za-z0-9_.-])",
             re.IGNORECASE,
         ),
     ),
-    ("Claude Workflow tool", re.compile(r"\bWorkflow(?:\s+tool|\s*\()")),
+    ("Claude Workflow tool", re.compile(r"\bWorkflow\s*\(\s*\{")),
     (
         "Claude slash-command tool",
-        re.compile(r"\bSlashCommand(?:\s+tool|\s*\()"),
+        re.compile(r"\bSlashCommand\s*\(\s*[\"']"),
     ),
 )
+CLAUDE_DOC_COMMAND = re.compile(
+    r"(?<![A-Za-z0-9_-])(?:[^\s\"'`|;&()]*/)?"
+    r"claude(?:\.(?:exe|cmd|bat))?"
+    r"(?:\s+(?:--?[A-Za-z0-9]|resume\b|continue\b)|(?=`))",
+    re.IGNORECASE,
+)
+BINARY_SUFFIXES = {".gif", ".ico", ".jpeg", ".jpg", ".pdf", ".png", ".webp", ".zip"}
+PROSE_SUFFIXES = {".md", ".mdx", ".rst", ".txt"}
 EXPECTED_LICENSE_SHA256 = "c920e7838ac1a06728211ce607e0c73f19bb566823eb888b6a6647c80300aaf1"
 
 errors: list[str] = []
@@ -101,6 +110,17 @@ errors: list[str] = []
 
 def fail(message: str) -> None:
     errors.append(message)
+
+
+def iter_strings(value: Any):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from iter_strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from iter_strings(item)
 
 
 def load_json(relative: str) -> dict[str, Any] | None:
@@ -146,6 +166,7 @@ def validate_manifest(plugin: str, runtime: str) -> dict[str, Any] | None:
     if not isinstance(data, dict):
         return None
     if runtime == "codex":
+        plugin_root = ROOT / "plugins" / plugin
         for key in sorted(set(data) - ALLOWED_MANIFEST_KEYS):
             fail(f"{relative}: unsupported Codex manifest field {key!r}")
     else:
@@ -219,11 +240,26 @@ def validate_manifest(plugin: str, runtime: str) -> dict[str, Any] | None:
             value = data.get(field)
             if value is not None and value != expected:
                 fail(f"{relative}: {field} must equal {expected}")
+            elif value is not None:
+                target = plugin_root / value.removeprefix("./")
+                if field == "skills" and not target.is_dir():
+                    fail(f"{relative}: declared skills directory does not exist")
+                if field == "apps" and not target.is_file():
+                    fail(f"{relative}: declared app manifest does not exist")
         mcp_servers = data.get("mcpServers")
         if mcp_servers is not None and not (
             isinstance(mcp_servers, dict) or mcp_servers == "./.mcp.json"
         ):
             fail(f"{relative}: mcpServers must be an object or ./.mcp.json")
+        elif isinstance(mcp_servers, str):
+            target = plugin_root / mcp_servers.removeprefix("./")
+            if not target.is_file():
+                fail(f"{relative}: declared MCP manifest does not exist")
+        elif isinstance(mcp_servers, dict):
+            for value in iter_strings(mcp_servers):
+                for label, pattern in FORBIDDEN_REFERENCE_PATTERNS:
+                    if pattern.search(value):
+                        fail(f"{relative}: inline MCP config contains forbidden {label}")
     return data
 
 
@@ -265,6 +301,8 @@ def validate_codex_marketplace() -> None:
         expected_path = f"./plugins/{plugin}"
         if source != {"source": "local", "path": expected_path}:
             fail(f"{relative}: {plugin} must use local source {expected_path}")
+        elif not (ROOT / "plugins" / plugin / ".codex-plugin/plugin.json").is_file():
+            fail(f"{relative}: {plugin} source does not contain a Codex manifest")
         policy = entry.get("policy")
         if not isinstance(policy, dict):
             fail(f"{relative}: {plugin} is missing policy")
@@ -332,8 +370,8 @@ def validate_upstream() -> dict[str, Any] | None:
     ):
         fail(f"{relative}: latest_observed_date must use YYYY-MM-DD")
     plugins = data.get("plugins")
-    if not isinstance(plugins, dict) or set(plugins) != set(PLUGINS):
-        fail(f"{relative}: plugin state must match the Phase 1 plugin set")
+    if not isinstance(plugins, dict) or set(plugins) != set(UPSTREAM_PLUGINS):
+        fail(f"{relative}: plugin state must match the tracked upstream plugin set")
         return data
     for plugin, state in plugins.items():
         if not isinstance(state, dict):
@@ -360,56 +398,45 @@ def validate_upstream() -> dict[str, Any] | None:
 
 
 def validate_adapter_boundaries() -> None:
-    for plugin in PLUGINS:
-        candidates: list[Path] = []
-        for manifest_dir in (".codex-plugin", ".grok-plugin"):
-            directory = ROOT / "plugins" / plugin / manifest_dir
-            if directory.exists():
-                candidates.extend(
-                    path for path in directory.rglob("*") if path.is_file()
-                )
-        for runtime in ("codex", "grok"):
-            adapter = ROOT / "plugins" / plugin / runtime
-            if adapter.exists():
-                candidates.extend(path for path in adapter.rglob("*") if path.is_file())
-        for component in (
-            "shared",
-            "skills",
-            "agents",
-            "commands",
-            "hooks",
-            "scripts",
-            "workflows",
-        ):
-            root_component = ROOT / "plugins" / plugin / component
-            if root_component.exists():
-                candidates.extend(
-                    path for path in root_component.rglob("*") if path.is_file()
-                )
-        for path in candidates:
-            if not path.is_file():
-                continue
-            try:
-                text = path.read_text(encoding="utf-8")
-            except UnicodeDecodeError:
-                continue
-            for line_number, line in enumerate(text.splitlines(), start=1):
-                for label, pattern in FORBIDDEN_ADAPTER_PATTERNS:
-                    if pattern.search(line):
-                        fail(
-                            f"{path.relative_to(ROOT)}:{line_number}: native runtime "
-                            f"file contains forbidden {label}"
-                        )
     for reviewer_root in ROOT.glob("plugins/*/reviewers"):
         if reviewer_root.exists():
             fail(
                 f"{reviewer_root.relative_to(ROOT)}: external reviewer code is "
                 "fail-closed until its read-only prepared-scope validator is implemented"
             )
+    plugins_root = ROOT / "plugins"
+    if not plugins_root.is_dir():
+        return
+    for path in plugins_root.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() in BINARY_SUFFIXES:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            fail(f"{path.relative_to(ROOT)}: unreadable runtime file: {exc}")
+            continue
+        is_manifest = path.name == "plugin.json" and path.parent.name in {
+            ".codex-plugin",
+            ".grok-plugin",
+        }
+        patterns = FORBIDDEN_REFERENCE_PATTERNS[:2] if is_manifest else FORBIDDEN_REFERENCE_PATTERNS
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            for label, pattern in patterns:
+                active_pattern = pattern
+                if label == "Claude executable" and path.suffix.lower() in PROSE_SUFFIXES:
+                    active_pattern = CLAUDE_DOC_COMMAND
+                if active_pattern.search(line):
+                    fail(
+                        f"{path.relative_to(ROOT)}:{line_number}: native runtime "
+                        f"file contains forbidden {label}"
+                    )
 
 
 def validate_docs(upstream_state: dict[str, Any] | None) -> None:
     required = (
+        ".gitignore",
         "AGENTS.md",
         "README.md",
         "docs/architecture.md",
@@ -431,9 +458,9 @@ def validate_docs(upstream_state: dict[str, Any] | None) -> None:
     readme = load_text("README.md")
     if parity is None or readme is None:
         return
-    license_path = ROOT / "LICENSE"
-    license_bytes = license_path.read_bytes() if license_path.is_file() else b""
-    if hashlib.sha256(license_bytes).hexdigest() != EXPECTED_LICENSE_SHA256:
+    license_text = load_text("LICENSE")
+    normalized_license = (license_text or "").replace("\r\n", "\n")
+    if hashlib.sha256(normalized_license.encode("utf-8")).hexdigest() != EXPECTED_LICENSE_SHA256:
         fail("LICENSE: content must match the repository MIT license template")
     rows: dict[str, list[str]] = {}
     for line in parity.splitlines():
@@ -474,8 +501,12 @@ def validate_docs(upstream_state: dict[str, Any] | None) -> None:
             fail(f"README.md: review date must equal upstream state {date}")
     if isinstance(observed, str) and observed not in parity:
         fail(f"docs/parity.md: missing latest observed upstream commit {observed}")
+    tracked_versions_match = re.search(
+        r"^- Upstream versions:(.*(?:\n  .*)*)$", readme, re.MULTILINE
+    )
+    tracked_versions = tracked_versions_match.group(1) if tracked_versions_match else ""
     plugin_state = upstream_state.get("plugins", {})
-    for plugin in PLUGINS:
+    for plugin in UPSTREAM_PLUGINS:
         state = plugin_state.get(plugin, {}) if isinstance(plugin_state, dict) else {}
         version = state.get("source_version") if isinstance(state, dict) else None
         row = rows.get(plugin, [])
@@ -490,14 +521,8 @@ def validate_docs(upstream_state: dict[str, Any] | None) -> None:
             version_pattern = re.compile(
                 rf"\b{re.escape(plugin)}\s+{re.escape(version)}(?![0-9A-Za-z.+-])"
             )
-            if version_pattern.search(readme) is None:
+            if version_pattern.search(tracked_versions) is None:
                 fail(f"README.md: missing tracked source version {plugin} {version}")
-
-    if isinstance(commit, str) and isinstance(date, str):
-        swarm_row = rows.get("swarm", [])
-        expected_sync = f"{date} / `{commit}`"
-        if swarm_row and swarm_row[4] != expected_sync:
-            fail(f"docs/parity.md: swarm Last sync must be {expected_sync}")
 
     readme_rows: dict[str, list[str]] = {}
     for line in readme.splitlines():
