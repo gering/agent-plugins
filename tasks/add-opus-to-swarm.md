@@ -64,3 +64,5 @@ The task is complete when a review started natively from both Codex and Grok
 can include an authenticated Opus voice, shows it as a separate Anthropic
 family in the merged report, remains read-only, and cannot review a different
 repository or worktree than the explicitly supplied scope.
+
+This task is a dependency of `tasks/port-swarm-p5.md`.

@@ -11,6 +11,18 @@ scaffolding alone does not qualify.
 - Last sync review: 2026-07-12
 - Dirty upstream files and untracked directories were excluded from the review.
 
+## Pending upstream review
+
+Claude PR
+[`#25`](https://github.com/gering/claude-plugins/pull/25) advances `swarm` to
+0.3.0 with opt-in `--fix`, `--loop`, and deepest-effort review behavior. Its
+committed branch head `fee6bc3d58c05f4d855b172221986cad66c25b6b` was inspected
+on 2026-07-12, but it is not the tracked baseline and has not been imported.
+Two additional uncommitted worktree changes were explicitly excluded. After
+the PR merges, review the resulting upstream `main` commit before updating this
+ledger or `.agents/upstream/claude-plugins.json`. The planned native mapping is
+tracked in `tasks/port-swarm-p5.md` and `tasks/add-opus-to-swarm.md`.
+
 Allowed states are `missing`, `planned`, `partial`, `parity`, and
 `intentional-divergence`.
 
@@ -20,7 +32,7 @@ Allowed states are `missing`, `planned`, `partial`, `parity`, and
 | knowledge-system | 1.8.2 at `f443fbb` | planned | planned | 2026-07-12 / `f443fbb` | Native memories are local preference stores; versioned project knowledge remains canonical. | Both manifests validated; no skills imported. |
 | work-system | 1.6.0 at `f443fbb` | planned | planned | 2026-07-12 / `f443fbb` | Launch/resume will use native Codex and Grok/herdr commands. | Both manifests validated; no workflow tests. |
 | pr-flow | 1.2.2 at `f443fbb` | planned | planned | 2026-07-12 / `f443fbb` | Local review is separated from optional GitHub `@claude review`. | Both manifests validated; no workflow tests. |
-| swarm | 0.2.0 at `f443fbb` | missing | missing | 2026-07-12 / `f443fbb` | Evaluation deferred until core workflows are stable. | Explicit Phase 1 deferral. |
+| swarm | 0.2.0 at `f443fbb`; PR #25 (0.3.0) pending | missing | missing | 2026-07-12 / `f443fbb` | Evaluation deferred until core workflows are stable; P5 native mapping is planned but not imported. | Phase 1 deferral plus reviewed pending tasks; no runtime implementation. |
 
 ## Baseline limitations
 

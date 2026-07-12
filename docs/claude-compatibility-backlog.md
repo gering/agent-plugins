@@ -47,3 +47,18 @@ Items here are proposals only. They must be implemented in a separate
 - Compatibility gain: upstream sync can map changed capabilities to native
   adapters mechanically and flag uncertain changes.
 - Existing-user behavior: none; metadata-only addition.
+
+## Isolate host-neutral swarm loop helpers
+
+- Affected Claude files: `plugins/swarm/scripts/loop-closeout.py`,
+  `plugins/swarm/skills/review/SKILL.md`, and associated tests introduced by
+  PR #25.
+- Motivation: loop termination arithmetic, open-finding trajectories, diff
+  scope rules, and report state are potentially shared semantics, while Claude
+  Workflow calls and Claude-only edit ownership are runtime behavior.
+- Compatibility gain: Codex and Grok adapters can reuse or compare a tested
+  neutral contract without importing Claude session assumptions or
+  `${CLAUDE_PLUGIN_ROOT}`.
+- Existing-user behavior: none if extraction preserves the current Claude
+  entrypoint and output; changing who may edit or how scope is inferred would
+  be behavior-changing and requires separate review.
