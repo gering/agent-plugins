@@ -10,6 +10,8 @@ scaffolding alone does not qualify.
 - Last reviewed commit: `f443fbb24fbcc06853de666a3737fbebe3064f1f`
 - Last sync review: 2026-07-12
 - Dirty upstream files and untracked directories were excluded from the review.
+- Newer unreviewed upstream `main` observed: `2e6c8d4947488890ae6d7b86c295a780f76aa2ad`
+  (includes swarm 0.2.1). Run `python3 scripts/check-upstream.py` to audit drift.
 
 ## Pending upstream review
 
@@ -29,11 +31,11 @@ Allowed states are `missing`, `planned`, `partial`, `parity`, and
 
 | Plugin | Claude source | Codex status | Grok status | Last sync | Differences | Evidence |
 |---|---|---|---|---|---|---|
-| project-adoption | New companion capability; no single Claude plugin source | planned | planned | 2026-07-12 / `f443fbb` | Read-only adoption audit will be native to this repository. | Both manifests validated; both local marketplaces registered in isolated homes. No workflow yet. |
-| knowledge-system | 1.8.2 at `f443fbb` | planned | planned | 2026-07-12 / `f443fbb` | Native memories are local preference stores; versioned project knowledge remains canonical. | Both manifests validated; no skills imported. |
-| work-system | 1.6.0 at `f443fbb` | planned | planned | 2026-07-12 / `f443fbb` | Launch/resume will use native Codex and Grok/herdr commands. | Both manifests validated; no workflow tests. |
-| pr-flow | 1.2.2 at `f443fbb` | planned | planned | 2026-07-12 / `f443fbb` | Local review is separated from optional GitHub `@claude review`. | Both manifests validated; no workflow tests. |
-| swarm | 0.2.0 at `f443fbb`; PR #25 (0.3.0) pending | missing | missing | 2026-07-12 / `f443fbb` | Evaluation deferred until core workflows are stable; P5 native mapping is planned but not imported. | Phase 1 deferral plus reviewed pending tasks; no runtime implementation. |
+| project-adoption | New companion capability; no single Claude plugin source | planned | planned | 2026-07-12 / `f443fbb24fbcc06853de666a3737fbebe3064f1f` | Read-only adoption audit will be native to this repository. | Both manifests validated; both local marketplaces registered in isolated homes. No workflow yet. |
+| knowledge-system | 1.8.2 at `f443fbb24fbcc06853de666a3737fbebe3064f1f` | planned | planned | 2026-07-12 / `f443fbb24fbcc06853de666a3737fbebe3064f1f` | Native memories are local preference stores; versioned project knowledge remains canonical. | Both manifests validated; no skills imported. |
+| work-system | 1.6.0 at `f443fbb24fbcc06853de666a3737fbebe3064f1f` | planned | planned | 2026-07-12 / `f443fbb24fbcc06853de666a3737fbebe3064f1f` | Launch/resume will use native Codex and Grok/herdr commands. | Both manifests validated; no workflow tests. |
+| pr-flow | 1.2.2 at `f443fbb24fbcc06853de666a3737fbebe3064f1f` | planned | planned | 2026-07-12 / `f443fbb24fbcc06853de666a3737fbebe3064f1f` | Local review is separated from optional GitHub `@claude review`. | Both manifests validated; no workflow tests. |
+| swarm | 0.2.0 at `f443fbb24fbcc06853de666a3737fbebe3064f1f`; PR #25 (0.3.0) pending | missing | missing | 2026-07-12 / `f443fbb24fbcc06853de666a3737fbebe3064f1f` | Evaluation deferred until core workflows are stable; P5 native mapping is planned but not imported. | Phase 1 deferral plus reviewed pending tasks; no runtime implementation. |
 
 ## Baseline limitations
 

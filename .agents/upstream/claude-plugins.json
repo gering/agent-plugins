@@ -5,7 +5,9 @@
     "local_path_hint": "../claude-plugins",
     "last_reviewed_commit": "f443fbb24fbcc06853de666a3737fbebe3064f1f",
     "last_reviewed_date": "2026-07-12",
-    "dirty_worktree_excluded": true
+    "dirty_worktree_excluded": true,
+    "latest_observed_commit": "2e6c8d4947488890ae6d7b86c295a780f76aa2ad",
+    "latest_observed_date": "2026-07-12"
   },
   "plugins": {
     "project-adoption": {

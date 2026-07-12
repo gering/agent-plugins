@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +29,17 @@ ALLOWED_MANIFEST_KEYS = {
     "repository",
     "license",
     "keywords",
+}
+ALLOWED_GROK_MANIFEST_KEYS = {
+    "name",
+    "version",
+    "description",
+    "author",
+    "homepage",
+    "repository",
+    "license",
+    "keywords",
+    "logo",
 }
 ALLOWED_INTERFACE_KEYS = {
     "displayName",
@@ -54,11 +67,11 @@ ALLOWED_PARITY_STATES = {
     "intentional-divergence",
 }
 SEMVER = re.compile(
-    r"^(?:0|[1-9]\d*)\."
-    r"(?:0|[1-9]\d*)\."
-    r"(?:0|[1-9]\d*)"
-    r"(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)"
-    r"(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?"
+    r"^(?:0|[1-9][0-9]*)\."
+    r"(?:0|[1-9][0-9]*)\."
+    r"(?:0|[1-9][0-9]*)"
+    r"(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?"
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
 )
 FORBIDDEN_ADAPTER_PATTERNS = (
@@ -67,7 +80,10 @@ FORBIDDEN_ADAPTER_PATTERNS = (
         re.compile(r"\$(?:\{CLAUDE_PLUGIN_ROOT\}|CLAUDE_PLUGIN_ROOT\b)"),
     ),
     ("Claude manifest path", re.compile(r"\.claude-plugin")),
-    ("Claude executable", re.compile(r"(?<![\w./-])claude(?=\s|$)")),
+    (
+        "Claude executable",
+        re.compile(r"(?<![A-Za-z0-9_-])(?:[^\s\"'`|;&()]*/)?claude(?![A-Za-z0-9_.-])"),
+    ),
     ("Claude Workflow tool", re.compile(r"\bWorkflow(?:\s+tool|\s*\()")),
     (
         "Claude slash-command tool",
@@ -75,6 +91,13 @@ FORBIDDEN_ADAPTER_PATTERNS = (
     ),
 )
 CLAUDE_REFERENCE_ALLOW_MARKER = "agent-plugins: allow-claude-reference"
+CLAUDE_REFERENCE_CONTEXT = re.compile(
+    r"\b(?:audit|detect|flag|identify|match|pattern|report|search)\b", re.IGNORECASE
+)
+CLAUDE_EXECUTION_CONTEXT = re.compile(
+    r"\b(?:exec|execute|invoke|launch|run|start)\b", re.IGNORECASE
+)
+EXPECTED_LICENSE_SHA256 = "c920e7838ac1a06728211ce607e0c73f19bb566823eb888b6a6647c80300aaf1"
 
 errors: list[str] = []
 
@@ -99,6 +122,18 @@ def load_json(relative: str) -> dict[str, Any] | None:
     return data
 
 
+def load_text(relative: str) -> str | None:
+    path = ROOT / relative
+    if not path.is_file():
+        fail(f"missing required file: {relative}")
+        return None
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        fail(f"invalid text in {relative}: {exc}")
+        return None
+
+
 def require_non_empty_string(
     payload: dict[str, Any], key: str, relative: str, *, prefix: str = ""
 ) -> None:
@@ -116,6 +151,9 @@ def validate_manifest(plugin: str, runtime: str) -> dict[str, Any] | None:
     if runtime == "codex":
         for key in sorted(set(data) - ALLOWED_MANIFEST_KEYS):
             fail(f"{relative}: unsupported Codex manifest field {key!r}")
+    else:
+        for key in sorted(set(data) - ALLOWED_GROK_MANIFEST_KEYS):
+            fail(f"{relative}: unsupported Grok manifest field {key!r}")
     if data.get("name") != plugin:
         fail(f"{relative}: name must equal plugin directory {plugin!r}")
     version = data.get("version")
@@ -131,6 +169,17 @@ def validate_manifest(plugin: str, runtime: str) -> dict[str, Any] | None:
         require_non_empty_string(author, "name", relative, prefix="author")
     if data.get("license") != "MIT":
         fail(f"{relative}: license must be MIT")
+    keywords = data.get("keywords")
+    if not isinstance(keywords, list) or any(
+        not isinstance(item, str) or not item.strip() for item in keywords
+    ):
+        fail(f"{relative}: keywords must be strings")
+    for field in ("homepage", "repository"):
+        value = data.get(field)
+        if value is not None:
+            parsed = urlparse(value) if isinstance(value, str) else None
+            if parsed is None or parsed.scheme != "https" or not parsed.netloc:
+                fail(f"{relative}: {field} must be an absolute HTTPS URL")
     if runtime == "codex":
         interface = data.get("interface")
         if not isinstance(interface, dict):
@@ -148,11 +197,36 @@ def validate_manifest(plugin: str, runtime: str) -> dict[str, Any] | None:
                 require_non_empty_string(interface, field, relative, prefix="interface")
             if "defaultPrompt" not in interface and "default_prompt" not in interface:
                 fail(f"{relative}: interface.defaultPrompt is required")
+            else:
+                prompt = interface.get("defaultPrompt", interface.get("default_prompt"))
+                if not (
+                    isinstance(prompt, str)
+                    and prompt.strip()
+                    or isinstance(prompt, list)
+                    and 0 < len(prompt) <= 3
+                    and all(isinstance(item, str) and item.strip() for item in prompt)
+                ):
+                    fail(f"{relative}: interface.defaultPrompt must be non-empty")
             capabilities = interface.get("capabilities")
             if not isinstance(capabilities, list) or any(
                 not isinstance(item, str) or not item.strip() for item in capabilities
             ):
                 fail(f"{relative}: interface.capabilities must be strings")
+            for field in ("websiteURL", "privacyPolicyURL", "termsOfServiceURL"):
+                value = interface.get(field)
+                if value is not None:
+                    parsed = urlparse(value) if isinstance(value, str) else None
+                    if parsed is None or parsed.scheme != "https" or not parsed.netloc:
+                        fail(f"{relative}: interface.{field} must be HTTPS")
+        for field, expected in (("skills", "./skills/"), ("apps", "./.app.json")):
+            value = data.get(field)
+            if value is not None and value != expected:
+                fail(f"{relative}: {field} must equal {expected}")
+        mcp_servers = data.get("mcpServers")
+        if mcp_servers is not None and not (
+            isinstance(mcp_servers, dict) or mcp_servers == "./.mcp.json"
+        ):
+            fail(f"{relative}: mcpServers must be an object or ./.mcp.json")
     return data
 
 
@@ -161,8 +235,15 @@ def validate_codex_marketplace() -> None:
     data = load_json(relative)
     if not isinstance(data, dict):
         return
+    if set(data) - {"name", "interface", "plugins"}:
+        fail(f"{relative}: unsupported top-level marketplace field")
     if data.get("name") != "gering-agent-plugins":
         fail(f"{relative}: unexpected marketplace name")
+    interface = data.get("interface")
+    if not isinstance(interface, dict):
+        fail(f"{relative}: interface must be an object")
+    else:
+        require_non_empty_string(interface, "displayName", relative, prefix="interface")
     entries = data.get("plugins")
     if not isinstance(entries, list):
         fail(f"{relative}: plugins must be an array")
@@ -207,6 +288,8 @@ def validate_grok_marketplace() -> None:
     data = load_json(relative)
     if not isinstance(data, dict):
         return
+    if set(data) - {"name", "description", "owner", "plugins"}:
+        fail(f"{relative}: unsupported top-level marketplace field")
     if data.get("name") != "gering-agent-plugins":
         fail(f"{relative}: unexpected marketplace name")
     if not isinstance(data.get("description"), str) or not data["description"].strip():
@@ -229,7 +312,7 @@ def validate_upstream() -> dict[str, Any] | None:
     upstream = data.get("upstream")
     if not isinstance(upstream, dict):
         fail(f"{relative}: upstream object is required")
-        return data
+        return None
     if upstream.get("repository") != "https://github.com/gering/claude-plugins.git":
         fail(f"{relative}: unexpected upstream repository")
     local_hint = upstream.get("local_path_hint")
@@ -243,6 +326,14 @@ def validate_upstream() -> dict[str, Any] | None:
         fail(f"{relative}: last_reviewed_date must use YYYY-MM-DD")
     if not isinstance(upstream.get("dirty_worktree_excluded"), bool):
         fail(f"{relative}: dirty_worktree_excluded must be boolean")
+    observed = upstream.get("latest_observed_commit")
+    if not isinstance(observed, str) or not re.fullmatch(r"[0-9a-f]{40}", observed):
+        fail(f"{relative}: latest_observed_commit must be a full Git SHA")
+    observed_date = upstream.get("latest_observed_date")
+    if not isinstance(observed_date, str) or not re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}", observed_date
+    ):
+        fail(f"{relative}: latest_observed_date must use YYYY-MM-DD")
     plugins = data.get("plugins")
     if not isinstance(plugins, dict) or set(plugins) != set(PLUGINS):
         fail(f"{relative}: plugin state must match the Phase 1 plugin set")
@@ -273,10 +364,13 @@ def validate_upstream() -> dict[str, Any] | None:
 
 def validate_adapter_boundaries() -> None:
     for plugin in PLUGINS:
-        candidates = [
-            ROOT / "plugins" / plugin / ".codex-plugin" / "plugin.json",
-            ROOT / "plugins" / plugin / ".grok-plugin" / "plugin.json",
-        ]
+        candidates: list[Path] = []
+        for manifest_dir in (".codex-plugin", ".grok-plugin"):
+            directory = ROOT / "plugins" / plugin / manifest_dir
+            if directory.exists():
+                candidates.extend(
+                    path for path in directory.rglob("*") if path.is_file()
+                )
         for runtime in ("codex", "grok"):
             adapter = ROOT / "plugins" / plugin / runtime
             if adapter.exists():
@@ -303,10 +397,19 @@ def validate_adapter_boundaries() -> None:
             except UnicodeDecodeError:
                 continue
             for line_number, line in enumerate(text.splitlines(), start=1):
-                if CLAUDE_REFERENCE_ALLOW_MARKER in line:
-                    continue
+                allow_reference = (
+                    CLAUDE_REFERENCE_ALLOW_MARKER in line
+                    and CLAUDE_REFERENCE_CONTEXT.search(line) is not None
+                    and CLAUDE_EXECUTION_CONTEXT.search(line) is None
+                )
                 for label, pattern in FORBIDDEN_ADAPTER_PATTERNS:
                     if pattern.search(line):
+                        if allow_reference and label in {
+                            "Claude plugin root",
+                            "Claude manifest path",
+                            "Claude executable",
+                        }:
+                            continue
                         fail(
                             f"{path.relative_to(ROOT)}:{line_number}: native runtime "
                             f"file contains forbidden {label}"
@@ -322,6 +425,7 @@ def validate_docs(upstream_state: dict[str, Any] | None) -> None:
         "docs/migration-from-claude.md",
         "docs/claude-compatibility-backlog.md",
         "docs/grok-installation.md",
+        "scripts/check-upstream.py",
         "LICENSE",
     )
     for relative in required:
@@ -331,14 +435,14 @@ def validate_docs(upstream_state: dict[str, Any] | None) -> None:
     readme_path = ROOT / "README.md"
     if not parity_path.is_file() or not readme_path.is_file():
         return
-    parity = parity_path.read_text(encoding="utf-8")
-    readme = readme_path.read_text(encoding="utf-8")
+    parity = load_text("docs/parity.md")
+    readme = load_text("README.md")
+    if parity is None or readme is None:
+        return
     license_path = ROOT / "LICENSE"
-    license_text = (
-        license_path.read_text(encoding="utf-8") if license_path.is_file() else ""
-    )
-    if "MIT License" not in license_text:
-        fail("LICENSE: MIT manifests require the MIT license text")
+    license_bytes = license_path.read_bytes() if license_path.is_file() else b""
+    if hashlib.sha256(license_bytes).hexdigest() != EXPECTED_LICENSE_SHA256:
+        fail("LICENSE: content must match the repository MIT license template")
     rows: dict[str, list[str]] = {}
     for line in parity.splitlines():
         columns = [column.strip() for column in line.split("|")[1:-1]]
@@ -360,9 +464,12 @@ def validate_docs(upstream_state: dict[str, Any] | None) -> None:
             fail(f"docs/parity.md: evidence is required for {plugin}")
     if not upstream_state:
         return
-    upstream = upstream_state.get("upstream", {})
+    upstream = upstream_state.get("upstream")
+    if not isinstance(upstream, dict):
+        return
     commit = upstream.get("last_reviewed_commit")
     date = upstream.get("last_reviewed_date")
+    observed = upstream.get("latest_observed_commit")
     if isinstance(commit, str):
         if f"- Last reviewed commit: `{commit}`" not in parity:
             fail(f"docs/parity.md: baseline commit must equal upstream state {commit}")
@@ -373,26 +480,39 @@ def validate_docs(upstream_state: dict[str, Any] | None) -> None:
             fail(f"docs/parity.md: baseline date must equal upstream state {date}")
         if f"- Review date: {date}" not in readme:
             fail(f"README.md: review date must equal upstream state {date}")
+    if isinstance(observed, str) and observed not in parity:
+        fail(f"docs/parity.md: missing latest observed upstream commit {observed}")
     plugin_state = upstream_state.get("plugins", {})
     for plugin in PLUGINS:
         state = plugin_state.get(plugin, {}) if isinstance(plugin_state, dict) else {}
         version = state.get("source_version") if isinstance(state, dict) else None
         row = rows.get(plugin, [])
         if row and isinstance(commit, str) and isinstance(date, str):
-            expected_sync = f"{date} / `{commit[:7]}`"
+            expected_sync = f"{date} / `{commit}`"
             if row[4] != expected_sync:
                 fail(f"docs/parity.md: {plugin} Last sync must be {expected_sync}")
         if version is not None and isinstance(commit, str):
-            expected_source = f"{version} at `{commit[:7]}`"
+            expected_source = f"{version} at `{commit}`"
             if not row or row[1] != expected_source:
                 fail(f"docs/parity.md: {plugin} source version must match upstream state")
-            if version not in readme:
+            version_pattern = re.compile(
+                rf"\b{re.escape(plugin)}\s+{re.escape(version)}(?![0-9A-Za-z.+-])"
+            )
+            if version_pattern.search(readme) is None:
                 fail(f"README.md: missing tracked source version {plugin} {version}")
+
+    if isinstance(commit, str) and isinstance(date, str):
+        swarm_row = rows.get("swarm", [])
+        expected_sync = f"{date} / `{commit}`"
+        if swarm_row and swarm_row[4] != expected_sync:
+            fail(f"docs/parity.md: swarm Last sync must be {expected_sync}")
 
     readme_rows: dict[str, list[str]] = {}
     for line in readme.splitlines():
         columns = [column.strip() for column in line.split("|")[1:-1]]
         if columns and columns[0] in PLUGINS:
+            if columns[0] in readme_rows:
+                fail(f"README.md: duplicate plugin status row for {columns[0]}")
             readme_rows[columns[0]] = columns
     for plugin in PLUGINS:
         parity_row = rows.get(plugin, [])

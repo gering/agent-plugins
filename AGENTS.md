@@ -15,6 +15,9 @@ not a runtime distributed here.
 - Detection-only references needed by migration audits must carry
   `agent-plugins: allow-claude-reference` on the same line. The marker never
   permits executing or depending on the referenced Claude runtime surface.
+- Optional external model-family reviewers live under
+  `plugins/<plugin>/reviewers/<family>/`, never in `shared/`, `codex/`, or
+  `grok/`. They remain read-only and require their own validation contract.
 - Do not edit the sibling `claude-plugins` checkout from this repository.
 - Treat a dirty upstream Claude worktree as excluded unless the user explicitly
   authorizes importing uncommitted changes.
@@ -33,6 +36,10 @@ Run the deterministic foundation check after structural changes:
 python3 scripts/check-structure.py
 python3 -m unittest tests/test_check_structure.py -v
 ```
+
+Run `python3 scripts/check-upstream.py` for a read-only sibling audit. Exit 1
+means a newer committed upstream exists and requires review; dirty paths are
+reported separately and remain excluded.
 
 Validate Grok manifests with its native validator when changing plugin
 metadata:

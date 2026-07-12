@@ -13,8 +13,10 @@ and PR workflows are stable. The current architecture names Codex and Grok as
 the shipped runtimes, but does not guarantee that a future native swarm retains
 the Claude/Opus review family used by the reference implementation.
 
-Opus is a review backend, not a runtime distributed by this repository. Its
-integration must use an explicit Claude CLI adapter and must not make
+Opus is an optional external review backend, not a runtime distributed by this
+repository. Its integration belongs in the narrowly scoped
+`plugins/swarm/reviewers/anthropic/` boundary, not in `shared/`, `codex/`, or
+`grok/`. It may use an explicit Claude CLI adapter but must not make
 `claude-plugins` a runtime dependency.
 
 A Phase 1 dogfood review also showed why scope must be explicit: invoking the
@@ -54,6 +56,7 @@ must receive the prepared diff or repository/ref explicitly.
 ## Relevant files
 
 - Future `plugins/swarm/shared/` review schema and merge logic
+- Future `plugins/swarm/reviewers/anthropic/` read-only external adapter
 - Future `plugins/swarm/codex/` and `plugins/swarm/grok/` orchestration adapters
 - `docs/parity.md`
 - `docs/claude-compatibility-backlog.md` when Claude-side changes are needed

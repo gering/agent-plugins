@@ -18,6 +18,8 @@ See the [parity ledger](docs/parity.md) for the detailed status.
 - Upstream versions: knowledge-system 1.8.2, work-system 1.6.0,
   pr-flow 1.2.2
 - Uncommitted upstream changes were detected and explicitly excluded.
+- A newer, not-yet-reviewed upstream `main` commit is recorded in the state
+  file; use `python3 scripts/check-upstream.py` to inspect drift.
 
 ## Plugin status
 
@@ -74,6 +76,7 @@ details.
 ```bash
 python3 scripts/check-structure.py
 python3 -m unittest tests/test_check_structure.py -v
+python3 scripts/check-upstream.py  # exits 1 when newer committed upstream exists
 ```
 
 This check validates manifests, marketplace relationships, upstream state,

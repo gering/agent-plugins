@@ -57,8 +57,10 @@ merged and its resulting `main` commit is reviewed.
   extract only host-neutral arithmetic and rendering behavior.
 - [ ] Keep diff preparation, findings schema, merge rules, redaction, loop
   termination, and report rendering in the shared layer where behavior matches.
-- [ ] Keep Workflow/Agent calls, CLI launch, model selection, edit authority,
-  and session state in Codex or Grok adapters.
+- [ ] Keep each host's own workflow calls, model selection, edit authority, and
+  session state in its Codex or Grok adapter. Put optional external reviewer
+  CLIs in `reviewers/<family>/`; never put Claude Workflow/Agent calls in a
+  native adapter.
 - [ ] Add bounded, stdin-closed, timeout-protected tests for deterministic
   helpers; do not execute arbitrary discovered test files without documenting
   the CI trust boundary.

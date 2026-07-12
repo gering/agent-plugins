@@ -216,6 +216,13 @@ Avoid a single large skill full of `if Claude`, `if Codex`, and `if Grok`
 branches. Separate entrypoints should call shared helpers or reference shared
 specifications.
 
+Optional external reviewer families are a separate boundary under
+`plugins/<plugin>/reviewers/<family>/`. They are not host adapters, remain
+read-only, receive an explicit prepared scope, and must degrade cleanly when
+their CLI or authentication is unavailable. For example, a future Opus voice
+may use `reviewers/anthropic/`; Claude CLI calls must not appear in `shared/`,
+`codex/`, or `grok/`.
+
 ## Knowledge and memory
 
 ### Canonical project knowledge
