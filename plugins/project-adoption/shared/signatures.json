@@ -1,0 +1,44 @@
+{
+  "paths": {
+    "agent_guidance": "AGENTS.md",
+    "reference_guidance": "CLAUDE.md",
+    "runtime_root": ".claude",
+    "settings": ".claude/settings.json",
+    "knowledge": ".claude/knowledge",
+    "rules": ".claude/rules",
+    "legacy_worktrees": ".claude/worktrees",
+    "neutral_worktrees": ".worktrees",
+    "task_handoff": "TASK.md",
+    "tasks": "tasks"
+  },
+  "content_patterns": [
+    {
+      "id": "claude-plugin-root",
+      "label": "Claude plugin-root variable",
+      "pattern": "\\$(?:\\{CLAUDE_PLUGIN_ROOT\\}|CLAUDE_PLUGIN_ROOT\\b)"
+    },
+    {
+      "id": "claude-cli",
+      "label": "Claude CLI command",
+      "pattern": "(?i)(?<![A-Za-z0-9_-])(?:[^\\s\\\"'`|;&()]*/)?claude(?:\\.(?:exe|cmd|bat))?(?:\\s+(?:--?[A-Za-z0-9]|resume\\b|continue\\b)|(?=`))"
+    },
+    {
+      "id": "claude-workflow-tool",
+      "label": "Claude Workflow tool call",
+      "pattern": "\\bWorkflow\\s*\\(\\s*\\{"
+    },
+    {
+      "id": "claude-slash-command-tool",
+      "label": "Claude SlashCommand tool call",
+      "pattern": "\\bSlashCommand\\s*\\(\\s*[\\\"']"
+    }
+  ],
+  "agent_specific_patterns": [
+    "(?i)Grok-Vertretung",
+    "(?i)you are (?:the )?Grok",
+    "(?i)Grok[- ]Sessions?",
+    "(?i)\\b(?:use|run|start|launch|resume|invoke)\\s+(?:the\\s+)?Grok\\b",
+    "(?i)\\balways\\b[^\\n]{0,40}\\bGrok\\b",
+    "(?i)Claude(?: Code)?-only"
+  ]
+}

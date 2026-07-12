@@ -61,11 +61,43 @@ class StructureCheckTests(unittest.TestCase):
     def test_available_unfinished_plugin_fails(self) -> None:
         relative = ".agents/plugins/marketplace.json"
         marketplace = self.read_json(relative)
-        marketplace["plugins"][0]["policy"]["installation"] = "AVAILABLE"
+        marketplace["plugins"][1]["policy"]["installation"] = "AVAILABLE"
         self.write_json(relative, marketplace)
         result = self.run_check()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("must use installation policy NOT_AVAILABLE", result.stderr)
+        self.assertIn("knowledge-system must use installation policy NOT_AVAILABLE", result.stderr)
+
+    def test_project_adoption_must_be_available(self) -> None:
+        relative = ".agents/plugins/marketplace.json"
+        marketplace = self.read_json(relative)
+        marketplace["plugins"][0]["policy"]["installation"] = "NOT_AVAILABLE"
+        self.write_json(relative, marketplace)
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("project-adoption must use installation policy AVAILABLE", result.stderr)
+
+    def test_available_project_adoption_requires_runtime_parity_status(self) -> None:
+        parity_path = self.root / "docs/parity.md"
+        parity = parity_path.read_text(encoding="utf-8").replace(
+            "| project-adoption | New companion capability; no single Claude plugin source | partial | planned |",
+            "| project-adoption | New companion capability; no single Claude plugin source | planned | planned |",
+        )
+        parity_path.write_text(parity, encoding="utf-8")
+        readme_path = self.root / "README.md"
+        readme = readme_path.read_text(encoding="utf-8").replace(
+            "| project-adoption | partial | planned |",
+            "| project-adoption | planned | planned |",
+        )
+        readme_path.write_text(readme, encoding="utf-8")
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("needs runtime evidence", result.stderr)
+
+    def test_available_project_adoption_requires_behavior_test(self) -> None:
+        (self.root / "tests/test_project_adoption.py").unlink()
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("available slice is missing required file", result.stderr)
 
     def test_duplicate_marketplace_name_fails(self) -> None:
         relative = ".agents/plugins/marketplace.json"
@@ -169,7 +201,7 @@ class StructureCheckTests(unittest.TestCase):
         parity_path = self.root / "docs/parity.md"
         parity = parity_path.read_text(encoding="utf-8")
         parity = parity.replace(
-            "2026-07-12 / `ee7bb2db650fb790530c7310be4b317a3e49bb56` | "
+            "2026-07-12 / `87917b5f3e6de28d2b550ee9e6ce0f7c62a441bd` | "
             "Native memories",
             "2026-07-11 / `deadbeefdeadbeefdeadbeefdeadbeefdeadbeef` | "
             "Native memories",
@@ -183,8 +215,8 @@ class StructureCheckTests(unittest.TestCase):
         readme_path = self.root / "README.md"
         readme = readme_path.read_text(encoding="utf-8")
         readme = readme.replace(
-            "| project-adoption | planned | planned |",
             "| project-adoption | partial | planned |",
+            "| project-adoption | parity | planned |",
         )
         readme_path.write_text(readme, encoding="utf-8")
         result = self.run_check()
@@ -345,6 +377,24 @@ class StructureCheckTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("external reviewer code is fail-closed", result.stderr)
 
+    def test_adoption_signature_schema_rejects_extra_fields(self) -> None:
+        relative = "plugins/project-adoption/shared/signatures.json"
+        signatures = self.read_json(relative)
+        signatures["command"] = "python3"
+        self.write_json(relative, signatures)
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsupported top-level fields", result.stderr)
+
+    def test_adoption_signature_schema_rejects_invalid_regex(self) -> None:
+        relative = "plugins/project-adoption/shared/signatures.json"
+        signatures = self.read_json(relative)
+        signatures["content_patterns"][0]["pattern"] = "["
+        self.write_json(relative, signatures)
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid regex", result.stderr)
+
     def test_invalid_utf8_runtime_file_fails_closed(self) -> None:
         script = self.root / "plugins/work-system/lib/launch.sh"
         script.parent.mkdir(parents=True)
@@ -431,8 +481,8 @@ class StructureCheckTests(unittest.TestCase):
     def test_swarm_last_sync_must_match_upstream_state(self) -> None:
         parity_path = self.root / "docs/parity.md"
         parity = parity_path.read_text(encoding="utf-8").replace(
-            "| swarm | 0.3.0 at `ee7bb2db650fb790530c7310be4b317a3e49bb56` | missing | missing | 2026-07-12 / `ee7bb2db650fb790530c7310be4b317a3e49bb56` |",
-            "| swarm | 0.3.0 at `ee7bb2db650fb790530c7310be4b317a3e49bb56` | missing | missing | 2026-07-11 / `deadbeefdeadbeefdeadbeefdeadbeefdeadbeef` |",
+            "| swarm | 0.3.0 at `87917b5f3e6de28d2b550ee9e6ce0f7c62a441bd` | missing | missing | 2026-07-12 / `87917b5f3e6de28d2b550ee9e6ce0f7c62a441bd` |",
+            "| swarm | 0.3.0 at `87917b5f3e6de28d2b550ee9e6ce0f7c62a441bd` | missing | missing | 2026-07-11 / `deadbeefdeadbeefdeadbeefdeadbeefdeadbeef` |",
         )
         parity_path.write_text(parity, encoding="utf-8")
         result = self.run_check()

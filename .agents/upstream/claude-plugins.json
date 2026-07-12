@@ -3,10 +3,10 @@
   "upstream": {
     "repository": "https://github.com/gering/claude-plugins.git",
     "local_path_hint": "../claude-plugins",
-    "last_reviewed_commit": "ee7bb2db650fb790530c7310be4b317a3e49bb56",
+    "last_reviewed_commit": "87917b5f3e6de28d2b550ee9e6ce0f7c62a441bd",
     "last_reviewed_date": "2026-07-12",
     "dirty_worktree_excluded": true,
-    "latest_observed_commit": "ee7bb2db650fb790530c7310be4b317a3e49bb56",
+    "latest_observed_commit": "87917b5f3e6de28d2b550ee9e6ce0f7c62a441bd",
     "latest_observed_date": "2026-07-12"
   },
   "plugins": {

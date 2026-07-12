@@ -1,13 +1,19 @@
 {
   "name": "project-adoption",
-  "version": "0.1.0",
+  "version": "0.1.0+codex.20260712194554",
   "description": "Audit an existing Claude-oriented project before adopting Codex or Grok.",
   "author": {
     "name": "gering"
   },
   "repository": "https://github.com/gering/agent-plugins",
   "license": "MIT",
-  "keywords": ["adoption", "migration", "codex", "grok"],
+  "keywords": [
+    "adoption",
+    "migration",
+    "codex",
+    "grok"
+  ],
+  "skills": "./skills/",
   "interface": {
     "displayName": "Project Adoption",
     "shortDescription": "Audit projects before agent adoption.",
