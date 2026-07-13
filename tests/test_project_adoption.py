@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import importlib.util
+import errno
 import json
 import os
+import resource
 import shutil
 import subprocess
 import sys
@@ -173,6 +175,22 @@ class ProjectAdoptionTests(unittest.TestCase):
         self.assertEqual(report["inventory"]["unscannedFileCount"], 0)
         self.assertEqual(report["inventory"]["policyExcludedFileCount"], 3)
 
+    def test_git_ignored_paths_are_reported_in_coverage(self) -> None:
+        self.write("AGENTS.md", "Shared rules.\n")
+        self.write(".gitignore", "ignored/\n")
+        self.write("ignored/launch.sh", "claude --resume\n")
+        report = self.report()
+        self.assertEqual(report["inventory"]["gitIgnoredPathCount"], 1)
+        ids = {finding["id"] for finding in report["findings"]}
+        self.assertNotIn("hardcoded-claude-cli", ids)
+
+    def test_non_git_pruned_directories_are_reported_in_coverage(self) -> None:
+        shutil.rmtree(self.root / ".git")
+        self.write("AGENTS.md", "Shared rules.\n")
+        self.write("secrets/launch.sh", "claude --resume\n")
+        report = self.report()
+        self.assertEqual(report["inventory"]["prunedDirectoryCount"], 1)
+
     def test_target_configured_fsmonitor_is_not_executed(self) -> None:
         marker = Path(self.tempdir.name) / "fsmonitor-ran"
         helper = self.root / "fsmonitor.sh"
@@ -218,7 +236,7 @@ class ProjectAdoptionTests(unittest.TestCase):
         (self.root / ".git").write_text(f"gitdir: {private / '.git'}\n", encoding="utf-8")
         result = self.run_audit()
         self.assertEqual(result.returncode, 2)
-        self.assertIn("linked-worktree metadata", result.stderr)
+        self.assertIn("not bound to the audit target", result.stderr)
 
     def test_real_linked_worktree_is_accepted(self) -> None:
         self.write("AGENTS.md", "Shared rules.\n")
@@ -228,6 +246,49 @@ class ProjectAdoptionTests(unittest.TestCase):
         self.git("worktree", "add", "-q", "-b", "linked", str(linked))
         result = subprocess.run(
             [sys.executable, str(AUDITOR), str(linked), "--format", "json"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads(result.stdout)["inventory"]["gitRepository"])
+
+    def test_separate_git_directory_fails_with_clear_limit(self) -> None:
+        shutil.rmtree(self.root / ".git")
+        metadata = Path(self.tempdir.name) / "separate-metadata"
+        result = subprocess.run(
+            ["git", "init", "-q", "--separate-git-dir", str(metadata), str(self.root)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.write("AGENTS.md", "Shared rules.\n")
+        result = self.run_audit()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--separate-git-dir layouts are unsupported", result.stderr)
+
+    def test_submodule_git_indirection_is_accepted(self) -> None:
+        source = Path(self.tempdir.name) / "submodule-source"
+        subprocess.run(["git", "init", "-q", "-b", "main", str(source)], check=True)
+        subprocess.run(["git", "-C", str(source), "config", "user.name", "Test"], check=True)
+        subprocess.run(["git", "-C", str(source), "config", "user.email", "test@example.com"], check=True)
+        (source / "AGENTS.md").write_text("Shared rules.\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(source), "commit", "-q", "-m", "fixture"], check=True)
+        self.write("AGENTS.md", "Parent rules.\n")
+        self.git("add", ".")
+        self.git("commit", "-q", "-m", "parent")
+        result = subprocess.run(
+            ["git", "-c", "protocol.file.allow=always", "-C", str(self.root),
+             "submodule", "add", "-q", str(source), "module"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = subprocess.run(
+            [sys.executable, str(AUDITOR), str(self.root / "module"), "--format", "json"],
             text=True,
             capture_output=True,
             check=False,
@@ -253,6 +314,14 @@ class ProjectAdoptionTests(unittest.TestCase):
         result = self.run_audit()
         self.assertEqual(result.returncode, 2)
         self.assertIn("Git HEAD is not a regular file", result.stderr)
+
+    def test_fifo_git_index_fails_closed_without_blocking(self) -> None:
+        index = self.root / ".git/index"
+        index.unlink(missing_ok=True)
+        os.mkfifo(index)
+        result = self.run_audit()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Git index is not a regular file", result.stderr)
 
     def test_fifo_candidate_is_reported_without_blocking(self) -> None:
         shutil.rmtree(self.root / ".git")
@@ -338,6 +407,58 @@ class ProjectAdoptionTests(unittest.TestCase):
                 anchor.verify()
         self.root.unlink()
         original.rename(self.root)
+
+    def test_git_directory_replacement_is_detected(self) -> None:
+        spec = importlib.util.spec_from_file_location("audit_project_git_swap_test", AUDITOR)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        external = Path(self.tempdir.name) / "external-git"
+        subprocess.run(["git", "init", "-q", "-b", "main", str(external)], check=True)
+        original = self.root / ".git-original"
+        with module.SafeGit(self.root) as git_context:
+            (self.root / ".git").rename(original)
+            (self.root / ".git").symlink_to(external / ".git", target_is_directory=True)
+            with self.assertRaisesRegex(module.AuditError, "metadata changed"):
+                git_context.run("status", "--porcelain")
+        (self.root / ".git").unlink()
+        original.rename(self.root / ".git")
+
+    def test_target_git_executable_is_not_resolved_from_relative_path(self) -> None:
+        marker = Path(self.tempdir.name) / "target-git-ran"
+        fake_git = self.root / "git"
+        fake_git.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 23\n", encoding="utf-8")
+        fake_git.chmod(0o755)
+        environment = os.environ.copy()
+        environment["PATH"] = f".:{environment.get('PATH', os.defpath)}"
+        result = subprocess.run(
+            [sys.executable, str(AUDITOR), str(self.root), "--format", "json"],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=environment,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(marker.exists())
+
+    def test_deep_candidate_does_not_exhaust_file_descriptors(self) -> None:
+        shutil.rmtree(self.root / ".git")
+        relative = Path(*(["deep"] * 80)) / "probe.txt"
+        self.write(relative.as_posix(), "safe\n")
+
+        def lower_fd_limit() -> None:
+            _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+            resource.setrlimit(resource.RLIMIT_NOFILE, (64, hard))
+
+        result = subprocess.run(
+            [sys.executable, str(AUDITOR), str(self.root), "--format", "json"],
+            text=True,
+            capture_output=True,
+            check=False,
+            preexec_fn=lower_fd_limit,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_total_content_budget_produces_scan_incomplete_finding(self) -> None:
         self.write("AGENTS.md", "Shared rules.\n")
@@ -435,6 +556,16 @@ class ProjectAdoptionTests(unittest.TestCase):
         ids = {finding["id"] for finding in self.report()["findings"]}
         self.assertIn("hardcoded-claude-cli", ids)
         self.assertIn("hardcoded-claude-plugin-root", ids)
+
+    def test_cli_with_file_descriptor_redirection_is_detected(self) -> None:
+        self.write("AGENTS.md", "Shared rules.\n")
+        self.write("scripts/launch.sh", "claude 2>errors.log\nclaude 1>>audit.log\n")
+        finding = next(
+            item for item in self.report()["findings"] if item["id"] == "hardcoded-claude-cli"
+        )
+        self.assertEqual(
+            finding["evidence"], ["scripts/launch.sh:1", "scripts/launch.sh:2"]
+        )
 
     def test_claude_code_prose_is_not_a_cli_command(self) -> None:
         self.write("AGENTS.md", "Shared rules.\n")
@@ -584,6 +715,26 @@ class ProjectAdoptionTests(unittest.TestCase):
         report = self.report()
         self.assertTrue(report["inventory"]["gitRepository"])
 
+    def test_non_utf8_git_path_is_scanned_with_escaped_evidence(self) -> None:
+        raw_path = os.fsencode(self.root) + b"/bad-\xff.sh"
+        try:
+            descriptor = os.open(raw_path, os.O_WRONLY | os.O_CREAT, 0o600)
+        except OSError as exc:
+            if exc.errno == errno.EILSEQ:
+                self.skipTest("filesystem rejects non-UTF-8 path bytes")
+            raise
+        try:
+            os.write(descriptor, b"claude --resume\n")
+        finally:
+            os.close(descriptor)
+        result = self.run_audit()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        finding = next(
+            item for item in report["findings"] if item["id"] == "hardcoded-claude-cli"
+        )
+        self.assertIn("bad-\\xff.sh:1", finding["evidence"])
+
     def test_reftable_repository_is_audited_when_supported(self) -> None:
         shutil.rmtree(self.root / ".git")
         result = subprocess.run(
@@ -647,6 +798,8 @@ class ProjectAdoptionTests(unittest.TestCase):
         self.assertIn("Coverage:", result.stdout)
         self.assertIn("unscanned candidate(s)", result.stdout)
         self.assertIn("policy-excluded candidate(s)", result.stdout)
+        self.assertIn("ignored Git path(s)", result.stdout)
+        self.assertIn("pruned directory path(s)", result.stdout)
         self.assertIn("No files were changed.", result.stdout)
 
     def test_missing_target_returns_exit_two(self) -> None:

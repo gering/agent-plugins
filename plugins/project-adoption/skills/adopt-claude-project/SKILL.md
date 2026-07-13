@@ -30,9 +30,11 @@ the audit.
 4. Treat exit code 2 as an audit failure. Do not continue with migration
    recommendations based on partial output.
 5. Present the result under these headings:
-   - Coverage: report `scannedContentBytes`, `unscannedFileCount`, and
-     `policyExcludedFileCount` together. Never describe zero unscanned files as
-     complete coverage without also showing policy exclusions.
+   - Coverage: report `scannedContentBytes`, `unscannedFileCount`,
+     `policyExcludedFileCount`, `gitIgnoredPathCount`, and
+     `prunedDirectoryCount` together. Never describe zero unscanned files as
+     complete coverage without also showing ignored, pruned, and policy
+     exclusions.
    - Already compatible: positive inventory signals that have no warning.
    - Preserve unchanged: findings whose `changeClass` is `preserve`.
    - Adapter or guidance gaps: all warning findings.
@@ -56,6 +58,10 @@ the audit.
 - If the target is dirty, continue the read-only audit but call out that the
   report includes the current working tree and must not be used as import
   provenance.
+- Support normal repositories, linked worktrees, and submodules whose Git
+  metadata binds `core.worktree` back to the target. Treat unbound
+  `--separate-git-dir` repositories as unsupported instead of weakening
+  metadata containment.
 
 After an approved migration, run the audit again and show the before/after
 finding IDs plus `git status --short`.

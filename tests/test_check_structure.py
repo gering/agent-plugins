@@ -488,8 +488,11 @@ class StructureCheckTests(unittest.TestCase):
 
     def test_swarm_source_version_must_match_upstream_state(self) -> None:
         parity_path = self.root / "docs/parity.md"
+        version = self.read_json(
+            ".agents/upstream/claude-plugins.json"
+        )["plugins"]["swarm"]["source_version"]
         parity = parity_path.read_text(encoding="utf-8").replace(
-            "| swarm | 0.3.0 at `", "| swarm | 0.2.0 at `"
+            f"| swarm | {version} at `", "| swarm | 0.2.0 at `"
         )
         parity_path.write_text(parity, encoding="utf-8")
         result = self.run_check()
@@ -519,13 +522,18 @@ class StructureCheckTests(unittest.TestCase):
 
     def test_readme_must_include_swarm_source_version(self) -> None:
         readme_path = self.root / "README.md"
+        version = self.read_json(
+            ".agents/upstream/claude-plugins.json"
+        )["plugins"]["swarm"]["source_version"]
         readme = readme_path.read_text(encoding="utf-8").replace(
-            ", swarm 0.3.0", ""
+            f", swarm {version}", ""
         )
         readme_path.write_text(readme, encoding="utf-8")
         result = self.run_check()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("missing tracked source version swarm 0.3.0", result.stderr)
+        self.assertIn(
+            f"missing tracked source version swarm {version}", result.stderr
+        )
 
 
 if __name__ == "__main__":

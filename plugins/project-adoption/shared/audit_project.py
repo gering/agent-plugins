@@ -9,6 +9,7 @@ import json
 import os
 import re
 import selectors
+import shutil
 import stat
 import subprocess
 import sys
@@ -29,6 +30,8 @@ AUDIT_TIMEOUT_SECONDS = 30
 MAX_GIT_OUTPUT_BYTES = 8 * 1024 * 1024
 MAX_GIT_ERROR_BYTES = 64 * 1024
 MAX_GIT_METADATA_BYTES = 4 * 1024 * 1024
+MAX_GIT_INDEX_BYTES = 32 * 1024 * 1024
+MAX_SHARED_INDEX_FILES = 32
 MAX_SCAN_PATHS = 50_000
 MAX_SCAN_PATH_BYTES = 8 * 1024 * 1024
 MAX_SCANNED_CONTENT_BYTES = 16 * 1024 * 1024
@@ -79,6 +82,11 @@ class AuditError(RuntimeError):
 def ensure_before_deadline(deadline: float) -> None:
     if time.monotonic() >= deadline:
         raise AuditError(f"audit timed out after {AUDIT_TIMEOUT_SECONDS} seconds")
+
+
+def display_path(path: Path) -> str:
+    """Render filesystem bytes deterministically without raw surrogate output."""
+    return os.fsencode(path.as_posix()).decode("utf-8", "backslashreplace")
 
 
 def secure_io_supported() -> bool:
@@ -180,34 +188,125 @@ def inspect_relative(
         os.close(current)
 
 
-def read_bounded_metadata(path: Path, label: str, maximum: int) -> str:
-    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+def read_bounded_at(
+    base_descriptor: int,
+    relative: Path,
+    label: str,
+    maximum: int,
+    *,
+    missing_ok: bool = False,
+) -> bytes | None:
+    current = os.dup(base_descriptor)
+    descriptor = -1
     try:
-        descriptor = os.open(path, flags)
-    except OSError as exc:
-        raise AuditError(f"cannot open {label}: {exc}") from exc
-    try:
+        for part in relative.parts[:-1]:
+            child = os.open(
+                part,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=current,
+            )
+            os.close(current)
+            current = child
+        try:
+            descriptor = os.open(
+                relative.parts[-1],
+                os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+                dir_fd=current,
+            )
+        except FileNotFoundError:
+            if missing_ok:
+                return None
+            raise
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
             raise AuditError(f"{label} is not a regular file")
         if metadata.st_size > maximum:
             raise AuditError(f"{label} exceeds {maximum} bytes")
-        chunks: list[bytes] = []
-        total = 0
-        while True:
-            chunk = os.read(descriptor, min(64 * 1024, maximum + 1 - total))
+        data = bytearray()
+        while len(data) <= maximum:
+            chunk = os.read(descriptor, min(64 * 1024, maximum + 1 - len(data)))
             if not chunk:
                 break
-            chunks.append(chunk)
-            total += len(chunk)
-            if total > maximum:
-                raise AuditError(f"{label} exceeds {maximum} bytes")
+            data.extend(chunk)
+        if len(data) > maximum:
+            raise AuditError(f"{label} exceeds {maximum} bytes")
+        return bytes(data)
+    except OSError as exc:
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR) and missing_ok:
+            return None
+        raise AuditError(f"cannot read {label}: {exc}") from exc
     finally:
-        os.close(descriptor)
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(current)
+
+
+def read_text_at(
+    base_descriptor: int,
+    relative: Path,
+    label: str,
+    maximum: int,
+    *,
+    missing_ok: bool = False,
+) -> str | None:
+    data = read_bounded_at(
+        base_descriptor, relative, label, maximum, missing_ok=missing_ok
+    )
+    if data is None:
+        return None
     try:
-        return b"".join(chunks).decode("utf-8")
+        return data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise AuditError(f"{label} is not valid UTF-8") from exc
+
+
+def open_directory_at(base_descriptor: int, relative: Path, label: str) -> int:
+    current = os.dup(base_descriptor)
+    try:
+        for part in relative.parts:
+            child = os.open(
+                part,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=current,
+            )
+            os.close(current)
+            current = child
+        return current
+    except OSError as exc:
+        os.close(current)
+        raise AuditError(f"cannot open {label}: {exc}") from exc
+
+
+def verify_directory_identity(path: Path, descriptor: int, label: str) -> None:
+    try:
+        path_metadata = path.lstat()
+        descriptor_metadata = os.fstat(descriptor)
+    except OSError as exc:
+        raise AuditError(f"{label} changed during inspection") from exc
+    if (
+        not stat.S_ISDIR(path_metadata.st_mode)
+        or (path_metadata.st_dev, path_metadata.st_ino)
+        != (descriptor_metadata.st_dev, descriptor_metadata.st_ino)
+    ):
+        raise AuditError(f"{label} changed during inspection")
+
+
+def resolve_git_executable(root: Path) -> str:
+    safe_entries: list[str] = []
+    for entry in os.environ.get("PATH", os.defpath).split(os.pathsep):
+        if not entry or not os.path.isabs(entry):
+            continue
+        resolved = Path(entry).resolve()
+        if resolved == root or root in resolved.parents:
+            continue
+        safe_entries.append(str(resolved))
+    candidate = shutil.which("git", path=os.pathsep.join(safe_entries))
+    if candidate is None:
+        raise AuditError("cannot find Git on an absolute trusted PATH entry")
+    resolved_candidate = Path(candidate).resolve()
+    if not resolved_candidate.is_file() or not os.access(resolved_candidate, os.X_OK):
+        raise AuditError("resolved Git executable is not a regular executable file")
+    return str(resolved_candidate)
 
 
 def read_bounded_relative_metadata(
@@ -246,7 +345,7 @@ def read_bounded_relative_metadata(
 
 def _git_directories(
     root: Path, anchor: RootAnchor, deadline: float
-) -> tuple[Path, Path] | None:
+) -> tuple[Path, Path, int, int, int, dict[str, str]] | None:
     ensure_before_deadline(deadline)
     dot_git = root / ".git"
     try:
@@ -259,6 +358,7 @@ def _git_directories(
         raise AuditError(".git is a symbolic link; refusing to load repository metadata")
     if stat.S_ISDIR(dot_git_metadata.st_mode):
         worktree_git_dir = dot_git
+        worktree_descriptor = open_directory_at(anchor.descriptor, Path(".git"), ".git")
     elif stat.S_ISREG(dot_git_metadata.st_mode):
         marker = read_bounded_relative_metadata(
             anchor, Path(".git"), ".git indirection", 4096
@@ -271,47 +371,96 @@ def _git_directories(
         worktree_git_dir = worktree_git_dir.resolve()
         if not worktree_git_dir.is_dir():
             raise AuditError(".git indirection does not name a directory")
-        backlink_path = worktree_git_dir / "gitdir"
-        if not backlink_path.is_file() or backlink_path.is_symlink():
-            raise AuditError(".git indirection is not linked-worktree metadata")
-        backlink = Path(
-            read_bounded_metadata(backlink_path, "Git worktree backlink", 4096).strip()
+        worktree_descriptor = os.open(
+            worktree_git_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
         )
-        if not backlink.is_absolute():
-            backlink = worktree_git_dir / backlink
-        if backlink.resolve() != dot_git.resolve():
-            raise AuditError("Git worktree backlink does not match the audit target")
     else:
         raise AuditError("unsupported .git metadata type")
 
     common_git_dir = worktree_git_dir
-    commondir = worktree_git_dir / "commondir"
-    if commondir.is_file():
-        common_git_dir = Path(
-            read_bounded_metadata(commondir, "Git commondir", 4096).strip()
-        )
+    commondir_text = read_text_at(
+        worktree_descriptor,
+        Path("commondir"),
+        "Git commondir",
+        4096,
+        missing_ok=True,
+    )
+    if commondir_text is not None:
+        common_git_dir = Path(commondir_text.strip())
         if not common_git_dir.is_absolute():
             common_git_dir = worktree_git_dir / common_git_dir
         common_git_dir = common_git_dir.resolve()
-    if not common_git_dir.is_dir() or not (common_git_dir / "objects").is_dir():
-        raise AuditError("Git object directory is missing")
-    if stat.S_ISREG(dot_git_metadata.st_mode) and (
-        worktree_git_dir.parent.resolve() != (common_git_dir / "worktrees").resolve()
-    ):
-        raise AuditError(".git indirection is outside linked-worktree metadata")
+    common_descriptor = os.open(
+        common_git_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    )
+    objects_descriptor = -1
+    try:
+        objects_descriptor = open_directory_at(
+            common_descriptor, Path("objects"), "Git object directory"
+        )
+        repository_format = _read_repository_format(common_descriptor)
+        if stat.S_ISREG(dot_git_metadata.st_mode):
+            backlink_text = read_text_at(
+                worktree_descriptor,
+                Path("gitdir"),
+                "Git worktree backlink",
+                4096,
+                missing_ok=True,
+            )
+            linked_worktree = False
+            if backlink_text is not None:
+                backlink = Path(backlink_text.strip())
+                if not backlink.is_absolute():
+                    backlink = worktree_git_dir / backlink
+                linked_worktree = (
+                    backlink.resolve() == dot_git.resolve()
+                    and worktree_git_dir.parent.resolve()
+                    == (common_git_dir / "worktrees").resolve()
+                )
+            configured_worktree = repository_format.get("core.worktree")
+            configured_binding = False
+            if configured_worktree:
+                configured = Path(configured_worktree)
+                if not configured.is_absolute():
+                    configured = common_git_dir / configured
+                configured_binding = configured.resolve() == root.resolve()
+            if not linked_worktree and not configured_binding:
+                raise AuditError(
+                    ".git indirection is not bound to the audit target; "
+                    "unbound --separate-git-dir layouts are unsupported"
+                )
+    except BaseException:
+        if objects_descriptor >= 0:
+            os.close(objects_descriptor)
+        os.close(common_descriptor)
+        os.close(worktree_descriptor)
+        raise
     anchor.verify()
-    return worktree_git_dir, common_git_dir
+    return (
+        worktree_git_dir,
+        common_git_dir,
+        worktree_descriptor,
+        common_descriptor,
+        objects_descriptor,
+        repository_format,
+    )
 
 
-def _read_repository_format(common_git_dir: Path) -> dict[str, str]:
-    config_path = common_git_dir / "config"
-    if not config_path.exists():
+def _read_repository_format(common_descriptor: int) -> dict[str, str]:
+    text = read_text_at(
+        common_descriptor,
+        Path("config"),
+        "Git repository config",
+        256 * 1024,
+        missing_ok=True,
+    )
+    if text is None:
         return {}
-    text = read_bounded_metadata(config_path, "Git repository config", 256 * 1024)
     section = ""
     values: dict[str, str] = {}
     approved = {
         ("core", "repositoryformatversion"),
+        ("core", "worktree"),
         ("extensions", "objectformat"),
         ("extensions", "refstorage"),
     }
@@ -326,7 +475,9 @@ def _read_repository_format(common_git_dir: Path) -> dict[str, str]:
         key, value = (part.strip() for part in line.split("=", 1))
         normalized = (section, key.lower())
         if normalized in approved:
-            values[f"{section}.{key.lower()}"] = value.lower()
+            values[f"{section}.{key.lower()}"] = (
+                value if normalized == ("core", "worktree") else value.lower()
+            )
     object_format = values.get("extensions.objectformat", "sha1")
     ref_storage = values.get("extensions.refstorage", "files")
     if object_format not in {"sha1", "sha256"}:
@@ -336,26 +487,33 @@ def _read_repository_format(common_git_dir: Path) -> dict[str, str]:
     return values
 
 
-def _read_head(worktree_git_dir: Path, common_git_dir: Path) -> str:
-    head_path = worktree_git_dir / "HEAD"
-    head = read_bounded_metadata(head_path, "Git HEAD", 4096).strip()
+def _read_head(worktree_descriptor: int, common_descriptor: int) -> str:
+    head_text = read_text_at(worktree_descriptor, Path("HEAD"), "Git HEAD", 4096)
+    assert head_text is not None
+    head = head_text.strip()
     if re.fullmatch(r"[0-9a-fA-F]{40,64}", head):
         return head.lower()
     if not head.startswith("ref: refs/") or ".." in Path(head[5:]).parts:
         raise AuditError("Git HEAD is malformed")
     reference = head[5:]
-    for base in (worktree_git_dir, common_git_dir):
-        loose = base / reference
-        if loose.is_file() and not loose.is_symlink():
-            value = read_bounded_metadata(loose, "Git HEAD reference", 4096).strip()
+    for base in (worktree_descriptor, common_descriptor):
+        loose_text = read_text_at(
+            base, Path(reference), "Git HEAD reference", 4096, missing_ok=True
+        )
+        if loose_text is not None:
+            value = loose_text.strip()
             if re.fullmatch(r"[0-9a-fA-F]{40,64}", value):
                 return value.lower()
             raise AuditError("Git HEAD reference is malformed")
-    packed_refs = common_git_dir / "packed-refs"
-    if packed_refs.is_file() and not packed_refs.is_symlink():
-        lines = read_bounded_metadata(
-            packed_refs, "packed Git references", MAX_GIT_METADATA_BYTES
-        ).splitlines()
+    packed_text = read_text_at(
+        common_descriptor,
+        Path("packed-refs"),
+        "packed Git references",
+        MAX_GIT_METADATA_BYTES,
+        missing_ok=True,
+    )
+    if packed_text is not None:
+        lines = packed_text.splitlines()
         for line in lines:
             fields = line.split(" ", 1)
             if len(fields) == 2 and fields[1] == reference and re.fullmatch(
@@ -363,6 +521,34 @@ def _read_head(worktree_git_dir: Path, common_git_dir: Path) -> str:
             ):
                 return fields[0].lower()
     return head
+
+
+def copy_git_index(worktree_descriptor: int, isolated: Path) -> None:
+    total = 0
+    names = ["index"]
+    with os.scandir(worktree_descriptor) as entries:
+        shared = sorted(
+            entry.name
+            for entry in entries
+            if entry.name.startswith("sharedindex.") and not entry.is_dir(follow_symlinks=False)
+        )
+    if len(shared) > MAX_SHARED_INDEX_FILES:
+        raise AuditError(f"Git shared index count exceeds {MAX_SHARED_INDEX_FILES}")
+    names.extend(shared)
+    for name in names:
+        data = read_bounded_at(
+            worktree_descriptor,
+            Path(name),
+            f"Git {name}",
+            MAX_GIT_INDEX_BYTES,
+            missing_ok=name == "index",
+        )
+        if data is None:
+            continue
+        total += len(data)
+        if total > MAX_GIT_INDEX_BYTES:
+            raise AuditError(f"Git index data exceeds {MAX_GIT_INDEX_BYTES} bytes")
+        (isolated / name).write_bytes(data)
 
 
 class SafeGit:
@@ -375,6 +561,7 @@ class SafeGit:
         anchor: RootAnchor | None = None,
     ):
         self.root = root
+        self.git_executable = resolve_git_executable(root)
         self.deadline = deadline or (time.monotonic() + AUDIT_TIMEOUT_SECONDS)
         self.anchor = anchor or RootAnchor(root)
         self._owns_anchor = anchor is None
@@ -390,17 +577,30 @@ class SafeGit:
         self._environment: dict[str, str] | None = None
         if directories is None:
             return
-        self.worktree_git_dir, self.common_git_dir = directories
-        self.repository_format = _read_repository_format(self.common_git_dir)
-        worktrees = self.common_git_dir / "worktrees"
+        (
+            self.worktree_git_dir,
+            self.common_git_dir,
+            self.worktree_descriptor,
+            self.common_descriptor,
+            self.objects_descriptor,
+            self.repository_format,
+        ) = directories
         linked = 0
-        if worktrees.is_dir():
-            for item in worktrees.iterdir():
-                ensure_before_deadline(self.deadline)
-                if item.is_dir() and not item.is_symlink():
-                    linked += 1
-                if linked > MAX_SCAN_PATHS:
-                    raise AuditError(f"Git worktree count exceeds {MAX_SCAN_PATHS}")
+        try:
+            worktrees_descriptor = open_directory_at(
+                self.common_descriptor, Path("worktrees"), "Git worktrees directory"
+            )
+        except AuditError:
+            worktrees_descriptor = -1
+        if worktrees_descriptor >= 0:
+            with os.scandir(worktrees_descriptor) as entries:
+                for item in entries:
+                    ensure_before_deadline(self.deadline)
+                    if item.is_dir(follow_symlinks=False):
+                        linked += 1
+                    if linked > MAX_SCAN_PATHS:
+                        raise AuditError(f"Git worktree count exceeds {MAX_SCAN_PATHS}")
+            os.close(worktrees_descriptor)
         self.worktree_count = linked + 1
 
     def __enter__(self) -> "SafeGit":
@@ -424,13 +624,24 @@ class SafeGit:
             config_lines.extend(f"\t{key} = {value}" for key, value in sorted(extensions.items()))
         (isolated / "config").write_text("\n".join(config_lines) + "\n", encoding="utf-8")
         (isolated / "HEAD").write_text(
-            f"{_read_head(self.worktree_git_dir, self.common_git_dir)}\n", encoding="utf-8"
+            f"{_read_head(self.worktree_descriptor, self.common_descriptor)}\n",
+            encoding="utf-8",
         )
+        copy_git_index(self.worktree_descriptor, isolated)
+        self._pass_descriptors = {
+            self.anchor.descriptor,
+            self.worktree_descriptor,
+            self.common_descriptor,
+            self.objects_descriptor,
+        }
         if extensions.get("refstorage") == "reftable":
-            reftable = self.common_git_dir / "reftable"
-            if not reftable.is_dir() or reftable.is_symlink():
-                raise AuditError("Git reftable storage is missing or unsafe")
-            (isolated / "reftable").symlink_to(reftable, target_is_directory=True)
+            self.reftable_descriptor = open_directory_at(
+                self.common_descriptor, Path("reftable"), "Git reftable storage"
+            )
+            self._pass_descriptors.add(self.reftable_descriptor)
+            (isolated / "reftable").symlink_to(
+                self.common_git_dir / "reftable", target_is_directory=True
+            )
         environment = os.environ.copy()
         for key in list(environment):
             if key.startswith("GIT_"):
@@ -441,7 +652,7 @@ class SafeGit:
                 "GIT_CONFIG_GLOBAL": os.devnull,
                 "GIT_CONFIG_NOSYSTEM": "1",
                 "GIT_DIR": str(isolated),
-                "GIT_INDEX_FILE": str(self.worktree_git_dir / "index"),
+                "GIT_INDEX_FILE": str(isolated / "index"),
                 "GIT_OBJECT_DIRECTORY": str(self.common_git_dir / "objects"),
                 "GIT_OPTIONAL_LOCKS": "0",
                 "GIT_TERMINAL_PROMPT": "0",
@@ -451,21 +662,50 @@ class SafeGit:
         self._environment = environment
         return self
 
+    def verify_git_layout(self) -> None:
+        self.anchor.verify()
+        verify_directory_identity(
+            self.worktree_git_dir,
+            self.worktree_descriptor,
+            "Git worktree metadata",
+        )
+        verify_directory_identity(
+            self.common_git_dir,
+            self.common_descriptor,
+            "Git common metadata",
+        )
+        verify_directory_identity(
+            self.common_git_dir / "objects",
+            self.objects_descriptor,
+            "Git object directory",
+        )
+        if getattr(self, "reftable_descriptor", -1) >= 0:
+            verify_directory_identity(
+                self.common_git_dir / "reftable",
+                self.reftable_descriptor,
+                "Git reftable storage",
+            )
+
     def __exit__(self, *_: object) -> None:
         if self._temporary is not None:
             self._temporary.cleanup()
         if self._owns_anchor:
             self.anchor.close()
+        for name in ("reftable_descriptor", "objects_descriptor", "common_descriptor", "worktree_descriptor"):
+            descriptor = getattr(self, name, -1)
+            if descriptor >= 0:
+                os.close(descriptor)
+                setattr(self, name, -1)
 
-    def run(self, *args: str) -> str:
+    def run(self, *args: str, decode_errors: str = "strict") -> str:
         if not self.is_repository or self._environment is None:
             raise AuditError("Git query requested outside an isolated repository context")
         ensure_before_deadline(self.deadline)
-        self.anchor.verify()
+        self.verify_git_layout()
         try:
             process = subprocess.Popen(
                 [
-                    "git",
+                    self.git_executable,
                     "--no-optional-locks",
                     "-c",
                     "core.fsmonitor=false",
@@ -479,6 +719,7 @@ class SafeGit:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=self._environment,
+                pass_fds=tuple(self._pass_descriptors),
             )
         except OSError as exc:
             raise AuditError(f"Git query could not start: {exc}") from exc
@@ -522,7 +763,7 @@ class SafeGit:
             process.stdout.close()
             process.stderr.close()
         try:
-            stdout = output["stdout"].decode("utf-8")
+            stdout = output["stdout"].decode("utf-8", errors=decode_errors)
             stderr = output["stderr"].decode("utf-8")
         except UnicodeDecodeError as exc:
             raise AuditError("Git query returned non-UTF-8 output") from exc
@@ -530,7 +771,7 @@ class SafeGit:
             detail = stderr.strip().splitlines()
             suffix = f": {detail[0]}" if detail else ""
             raise AuditError(f"Git {' '.join(args)} failed{suffix}")
-        self.anchor.verify()
+        self.verify_git_layout()
         return stdout
 
 
@@ -550,7 +791,8 @@ def bounded_walk(
     budget: dict[str, int] | None = None,
 ) -> list[tuple[Path, bool]]:
     """Stream a deterministic, no-follow tree inventory below an anchored root."""
-    state = budget if budget is not None else {"paths": 0, "bytes": 0}
+    state = budget if budget is not None else {"paths": 0, "bytes": 0, "pruned": 0}
+    state.setdefault("pruned", 0)
     pending = [start]
     entries_found: list[tuple[Path, bool]] = []
     while pending:
@@ -576,7 +818,7 @@ def bounded_walk(
                     ensure_before_deadline(deadline)
                     relative = relative_directory / entry.name
                     state["paths"] += 1
-                    state["bytes"] += len(relative.as_posix().encode("utf-8"))
+                    state["bytes"] += len(os.fsencode(relative.as_posix()))
                     if state["paths"] > MAX_SCAN_PATHS:
                         raise AuditError(f"{label} path count exceeds {MAX_SCAN_PATHS}")
                     if state["bytes"] > MAX_SCAN_PATH_BYTES:
@@ -586,6 +828,8 @@ def bounded_walk(
                     if entry.is_dir(follow_symlinks=False):
                         if entry.name not in SKIPPED_PARTS:
                             directories.append(relative)
+                        else:
+                            state["pruned"] += 1
                     else:
                         entries_found.append((root / relative, entry.is_symlink()))
         finally:
@@ -598,25 +842,56 @@ def bounded_walk(
 
 def tracked_files(
     root: Path, git: SafeGit, anchor: RootAnchor, deadline: float
-) -> list[Path]:
+) -> tuple[list[Path], int, int]:
     if git.is_repository:
-        output = git.run("ls-files", "-z", "--cached", "--others", "--exclude-standard")
+        output = git.run(
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            decode_errors="surrogateescape",
+        )
         items = [item for item in output.split("\0") if item]
         if len(items) > MAX_SCAN_PATHS:
             raise AuditError(f"scan candidate count exceeds {MAX_SCAN_PATHS}")
-        if sum(len(item.encode("utf-8")) for item in items) > MAX_SCAN_PATH_BYTES:
+        if sum(len(os.fsencode(item)) for item in items) > MAX_SCAN_PATH_BYTES:
             raise AuditError(f"scan candidate paths exceed {MAX_SCAN_PATH_BYTES} bytes")
         for item in items:
             candidate = Path(item)
             if candidate.is_absolute() or ".." in candidate.parts:
-                raise AuditError(f"Git returned unsafe path: {item}")
-        return sorted((root / item for item in items), key=lambda item: item.relative_to(root).as_posix())
-    return [
+                raise AuditError(f"Git returned unsafe path: {display_path(candidate)}")
+        ignored_output = git.run(
+            "ls-files",
+            "-z",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+            "--no-empty-directory",
+            decode_errors="surrogateescape",
+        )
+        ignored = [item for item in ignored_output.split("\0") if item]
+        if len(ignored) > MAX_SCAN_PATHS:
+            raise AuditError(f"ignored Git path count exceeds {MAX_SCAN_PATHS}")
+        if sum(len(os.fsencode(item)) for item in ignored) > MAX_SCAN_PATH_BYTES:
+            raise AuditError(f"ignored Git paths exceed {MAX_SCAN_PATH_BYTES} bytes")
+        return (
+            sorted(
+                (root / item for item in items),
+                key=lambda item: item.relative_to(root).as_posix(),
+            ),
+            len(ignored),
+            0,
+        )
+    budget = {"paths": 0, "bytes": 0, "pruned": 0}
+    candidates = [
         path
         for path, _ in bounded_walk(
-            root, anchor, Path(), deadline, "scan candidate"
+            root, anchor, Path(), deadline, "scan candidate", budget
         )
     ]
+    return candidates, 0, budget["pruned"]
 
 
 def content_excluded(path: Path, root: Path) -> bool:
@@ -635,25 +910,25 @@ def read_candidate_text(
 ) -> tuple[str | None, str | None]:
     relative = path.relative_to(root)
     if relative.is_absolute() or ".." in relative.parts or not relative.parts:
-        raise AuditError(f"unsafe scan candidate: {relative.as_posix()}")
+        raise AuditError(f"unsafe scan candidate: {display_path(relative)}")
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     no_follow = getattr(os, "O_NOFOLLOW", 0)
     if not no_follow and inspect_relative(anchor, relative)[1] is not None:
         return None, "symlink"
-    descriptors: list[int] = []
+    current = -1
+    descriptor = -1
     try:
         anchor.verify()
         current = os.dup(anchor.descriptor)
-        descriptors.append(current)
         for part in relative.parts[:-1]:
-            current = os.open(part, directory_flags | no_follow, dir_fd=current)
-            descriptors.append(current)
+            child = os.open(part, directory_flags | no_follow, dir_fd=current)
+            os.close(current)
+            current = child
         descriptor = os.open(
             relative.parts[-1],
             os.O_RDONLY | os.O_NONBLOCK | no_follow,
             dir_fd=current,
         )
-        descriptors.append(descriptor)
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
             return None, "non-regular"
@@ -676,11 +951,10 @@ def read_candidate_text(
             return None, "symlink"
         return None, f"unreadable:{exc.errno}"
     finally:
-        for descriptor in reversed(descriptors):
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
+        if descriptor >= 0:
+            os.close(descriptor)
+        if current >= 0:
+            os.close(current)
 
 
 def add_finding(
@@ -718,20 +992,22 @@ def read_explicit_text(
     if relative.is_absolute() or ".." in relative.parts or not relative.parts:
         raise AuditError(f"unsafe explicit input: {relative.as_posix()}")
     directory_flags = os.O_RDONLY | os.O_DIRECTORY
-    descriptors: list[int] = []
+    current = -1
+    descriptor = -1
     try:
         anchor.verify()
         current = os.dup(anchor.descriptor)
-        descriptors.append(current)
         for part in relative.parts[:-1]:
-            current = os.open(part, directory_flags | os.O_NOFOLLOW, dir_fd=current)
-            descriptors.append(current)
+            child = os.open(
+                part, directory_flags | os.O_NOFOLLOW, dir_fd=current
+            )
+            os.close(current)
+            current = child
         descriptor = os.open(
             relative.parts[-1],
             os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
             dir_fd=current,
         )
-        descriptors.append(descriptor)
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
             raise AuditError(f"explicit input is not a regular file: {relative.as_posix()}")
@@ -776,11 +1052,10 @@ def read_explicit_text(
         )
         return None
     finally:
-        for descriptor in reversed(descriptors):
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
+        if descriptor >= 0:
+            os.close(descriptor)
+        if current >= 0:
+            os.close(current)
 
 
 def enabled_plugins_from_settings(root: Path, path: Path, text: str) -> dict[str, bool]:
@@ -820,7 +1095,7 @@ def ignored_memory_integrations(
     deadline: float,
 ) -> list[str]:
     integrations: list[str] = []
-    budget = {"paths": 0, "bytes": 0}
+    budget = {"paths": 0, "bytes": 0, "pruned": 0}
     for relative_root in (Path(runtime_root), Path("scripts")):
         for candidate, is_symlink in bounded_walk(
             root,
@@ -832,9 +1107,9 @@ def ignored_memory_integrations(
         ):
             relative = candidate.relative_to(root)
             if is_symlink and any("memory" in part.lower() for part in relative.parts):
-                integrations.append(relative.as_posix())
+                integrations.append(display_path(relative))
             elif "memory" in candidate.name.lower() and "link" in candidate.name.lower():
-                integrations.append(relative.as_posix())
+                integrations.append(display_path(relative))
     return integrations
 
 
@@ -1061,7 +1336,11 @@ def audit_in_context(
             settings_evidence,
         )
 
-    candidates = tracked_files(root, git, anchor, deadline)
+    candidates, git_ignored_path_count, pruned_directory_count = tracked_files(
+        root, git, anchor, deadline
+    )
+    inventory["gitIgnoredPathCount"] = git_ignored_path_count
+    inventory["prunedDirectoryCount"] = pruned_directory_count
     memory_integrations: list[str] = []
     for path in candidates:
         relative = path.relative_to(root)
@@ -1071,7 +1350,7 @@ def audit_in_context(
         is_link_helper = "memory" in path.name.lower() and "link" in path.name.lower()
         _, symlink_relative = inspect_relative(anchor, relative)
         if is_link_helper or (symlink_relative is not None and has_memory_name):
-            memory_integrations.append(relative.as_posix())
+            memory_integrations.append(display_path(relative))
     memory_integrations.extend(
         ignored_memory_integrations(root, anchor, paths["runtime_root"], deadline)
     )
@@ -1114,7 +1393,9 @@ def audit_in_context(
         if reason is not None:
             unscanned_count += 1
             if len(unscanned_evidence) < MAX_EVIDENCE_PER_PATTERN:
-                unscanned_evidence.append(f"{path.relative_to(root).as_posix()}:{reason}")
+                unscanned_evidence.append(
+                    f"{display_path(path.relative_to(root))}:{reason}"
+                )
         if text is None:
             continue
         content_bytes = len(text.encode("utf-8"))
@@ -1134,11 +1415,11 @@ def audit_in_context(
                 if len(unscanned_evidence) >= MAX_EVIDENCE_PER_PATTERN:
                     break
                 unscanned_evidence.append(
-                    f"{skipped.relative_to(root).as_posix()}:scan-budget"
+                    f"{display_path(skipped.relative_to(root))}:scan-budget"
                 )
             break
         scanned_content_bytes += content_bytes
-        relative = path.relative_to(root).as_posix()
+        relative = display_path(path.relative_to(root))
         fence_marker: str | None = None
         for line_number, line in enumerate(text.splitlines(), 1):
             stripped_line = line.lstrip()
@@ -1258,7 +1539,9 @@ def render_text(report: dict[str, Any]) -> str:
             "Coverage: "
             f"{inventory['scannedContentBytes']} content byte(s) scanned; "
             f"{inventory['unscannedFileCount']} unscanned candidate(s); "
-            f"{inventory['policyExcludedFileCount']} policy-excluded candidate(s)"
+            f"{inventory['policyExcludedFileCount']} policy-excluded candidate(s); "
+            f"{inventory['gitIgnoredPathCount']} ignored Git path(s); "
+            f"{inventory['prunedDirectoryCount']} pruned directory path(s)"
         ),
         "",
     ]

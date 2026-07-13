@@ -13,15 +13,16 @@ exist. See the [parity ledger](docs/parity.md) for the detailed status.
 ## Tracked upstream
 
 - Repository: `gering/claude-plugins`
-- Reviewed commit: `390c1caa2ddd1230c4dc5cee7be40f30fae1d3f2`
+- Reviewed commit: `59996c259786eb2d4d6b9805925439745eb5c6e3`
 - Review date: 2026-07-13
 - Upstream versions: knowledge-system 1.8.2, work-system 1.6.0,
-  pr-flow 1.2.3, swarm 0.3.0
+  pr-flow 1.2.3, swarm 0.3.1
 - Uncommitted upstream changes were detected and explicitly excluded.
 - The merged swarm 0.3.0 upstream was reviewed without importing dirty files.
   Later knowledge-only reindex/link fixes through `87917b5` were also reviewed;
-  PR #27's pr-flow review-table alignment through `390c1ca` was reviewed next.
-  No runtime implementation was imported.
+  PR #27's pr-flow review-table alignment through `390c1ca` and PR #28's
+  finding-fence hardening through `59996c2` were reviewed next. No runtime
+  implementation was imported.
   Use `python3 scripts/check-upstream.py` to compare the recorded state with
   the locally cached upstream `origin/main` ref.
 
@@ -60,7 +61,10 @@ For local development, substitute the repository checkout path for
 then invoke `$adopt-claude-project` with an explicit target repository. The
 initial audit is read-only; it does not rewrite guidance, knowledge, settings,
 or worktrees. Its result reports scanned bytes, exceptional unscanned files,
-and intentional policy exclusions as separate coverage values.
+intentional policy exclusions, ignored Git paths, and pruned directory paths as
+separate coverage values. Normal repositories, linked worktrees, and bound
+submodules are supported; unbound `--separate-git-dir` layouts fail with an
+explicit unsupported-layout error.
 
 ## Grok marketplace
 
