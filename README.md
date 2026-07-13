@@ -51,11 +51,16 @@ codex plugin list
 codex plugin add project-adoption@gering-agent-plugins
 ```
 
+`project-adoption` currently requires a POSIX host. It fails closed on Windows
+or any host without descriptor-relative no-follow file I/O rather than reducing
+its target-containment guarantees.
+
 For local development, substitute the repository checkout path for
 `gering/agent-plugins`. Start a new Codex session after installing or updating,
 then invoke `$adopt-claude-project` with an explicit target repository. The
 initial audit is read-only; it does not rewrite guidance, knowledge, settings,
-or worktrees.
+or worktrees. Its result reports scanned bytes, exceptional unscanned files,
+and intentional policy exclusions as separate coverage values.
 
 ## Grok marketplace
 

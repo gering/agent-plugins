@@ -1,4 +1,4 @@
 interface:
   display_name: "Adopt Claude Project"
-  short_description: "Audit Claude projects for safe agent adoption"
-  default_prompt: "Use $adopt-claude-project to audit this repository read-only for Codex and Grok adoption."
+  short_description: "Audit Claude projects safely on POSIX hosts"
+  default_prompt: "Use $adopt-claude-project on a POSIX host to audit this repository read-only for Codex and Grok adoption."

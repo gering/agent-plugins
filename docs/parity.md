@@ -34,7 +34,7 @@ Allowed states are `missing`, `planned`, `partial`, `parity`, and
 
 | Plugin | Claude source | Codex status | Grok status | Last sync | Differences | Evidence |
 |---|---|---|---|---|---|---|
-| project-adoption | New companion capability; no single Claude plugin source | partial | planned | 2026-07-13 / `390c1caa2ddd1230c4dc5cee7be40f30fae1d3f2` | Codex ships a read-only native audit; Grok adapter and approved apply mode remain planned. | 88 deterministic tests; native manifest validation; isolated Codex install; fresh-session skill discovery and non-mutating audit of `muellmann-app.de` with expected guidance, knowledge, memory, plugin, and worktree findings. |
+| project-adoption | New companion capability; no single Claude plugin source | partial | planned | 2026-07-13 / `390c1caa2ddd1230c4dc5cee7be40f30fae1d3f2` | Codex ships a POSIX-only, read-only native audit; Windows support, Grok adapter, and approved apply mode remain planned. | Complete deterministic test suite; native manifest validation; isolated Codex install; fresh-session skill discovery and non-mutating audit of `muellmann-app.de` with explicit scanned, unscanned, and policy-excluded coverage. |
 | knowledge-system | 1.8.2 at `390c1caa2ddd1230c4dc5cee7be40f30fae1d3f2` | planned | planned | 2026-07-13 / `390c1caa2ddd1230c4dc5cee7be40f30fae1d3f2` | Native memories are local preference stores; versioned project knowledge remains canonical. | Both manifests validated; no skills imported. |
 | work-system | 1.6.0 at `390c1caa2ddd1230c4dc5cee7be40f30fae1d3f2` | planned | planned | 2026-07-13 / `390c1caa2ddd1230c4dc5cee7be40f30fae1d3f2` | Launch/resume will use native Codex and Grok/herdr commands. | Both manifests validated; no workflow tests. |
 | pr-flow | 1.2.3 at `390c1caa2ddd1230c4dc5cee7be40f30fae1d3f2` | planned | planned | 2026-07-13 / `390c1caa2ddd1230c4dc5cee7be40f30fae1d3f2` | Local review is separated from optional GitHub `@claude review`; upstream's review-table alignment remains unported. | Both manifests validated; PR #27 format changes reviewed; no workflow tests. |
@@ -44,6 +44,8 @@ Allowed states are `missing`, `planned`, `partial`, `parity`, and
 
 - Only Codex `project-adoption` is currently advertised as installable; all
   other Codex plugins and every Grok plugin remain unavailable.
+- Codex `project-adoption` currently requires POSIX descriptor-relative
+  no-follow file I/O and fails closed on unsupported hosts, including Windows.
 - Fresh-session discovery is proven for Codex `project-adoption`; other Codex
   plugins and every Grok workflow remain untested and unavailable.
 - Grok native plugin commands and local marketplace registration were verified

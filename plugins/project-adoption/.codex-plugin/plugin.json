@@ -1,7 +1,7 @@
 {
   "name": "project-adoption",
-  "version": "0.1.0+codex.20260713081557",
-  "description": "Audit an existing Claude-oriented project before adopting Codex or Grok.",
+  "version": "0.1.0+codex.20260713103726",
+  "description": "Run a POSIX-only, read-only audit before adopting Codex or Grok.",
   "author": {
     "name": "gering"
   },
@@ -16,11 +16,11 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Project Adoption",
-    "shortDescription": "Audit projects before agent adoption.",
-    "longDescription": "Reports Claude-specific assumptions and safe Codex or Grok adoption steps without changing the project by default.",
+    "shortDescription": "Run a safe POSIX project-adoption audit.",
+    "longDescription": "On POSIX hosts, reports Claude-specific assumptions, coverage limits, and safe Codex or Grok adoption steps without changing the project.",
     "developerName": "gering",
     "category": "Productivity",
     "capabilities": [],
-    "defaultPrompt": "Audit this project for Codex and Grok adoption."
+    "defaultPrompt": "On a POSIX host, audit this project read-only for Codex and Grok adoption."
   }
 }

@@ -81,6 +81,105 @@ def ensure_before_deadline(deadline: float) -> None:
         raise AuditError(f"audit timed out after {AUDIT_TIMEOUT_SECONDS} seconds")
 
 
+def secure_io_supported() -> bool:
+    """Return whether descriptor-relative, no-follow reads are available."""
+    return (
+        os.name == "posix"
+        and hasattr(os, "O_NOFOLLOW")
+        and os.open in getattr(os, "supports_dir_fd", set())
+    )
+
+
+class RootAnchor:
+    """Keep the audited directory bound to one stable POSIX descriptor."""
+
+    def __init__(self, root: Path):
+        self.root = root
+        self.descriptor = os.open(
+            root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        )
+        try:
+            metadata = os.fstat(self.descriptor)
+            self.identity = (metadata.st_dev, metadata.st_ino)
+            self.verify()
+        except BaseException:
+            self.close()
+            raise
+
+    def verify(self) -> None:
+        try:
+            metadata = self.root.lstat()
+        except OSError as exc:
+            raise AuditError("audit target changed during inspection") from exc
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or (metadata.st_dev, metadata.st_ino) != self.identity
+        ):
+            raise AuditError("audit target changed during inspection")
+
+    def close(self) -> None:
+        if self.descriptor >= 0:
+            os.close(self.descriptor)
+            self.descriptor = -1
+
+    def __enter__(self) -> "RootAnchor":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
+def open_relative_directory(anchor: RootAnchor, relative: Path) -> int:
+    """Open a directory below the anchored root without following links."""
+    anchor.verify()
+    current = os.dup(anchor.descriptor)
+    try:
+        for part in relative.parts:
+            descriptor = os.open(
+                part,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=current,
+            )
+            os.close(current)
+            current = descriptor
+        return current
+    except BaseException:
+        os.close(current)
+        raise
+
+
+def inspect_relative(
+    anchor: RootAnchor, relative: Path
+) -> tuple[os.stat_result | None, Path | None]:
+    """Inspect a relative path without following any component symlink."""
+    anchor.verify()
+    current = os.dup(anchor.descriptor)
+    walked = Path()
+    try:
+        for index, part in enumerate(relative.parts):
+            walked /= part
+            try:
+                metadata = os.stat(part, dir_fd=current, follow_symlinks=False)
+            except (FileNotFoundError, NotADirectoryError):
+                return None, None
+            if stat.S_ISLNK(metadata.st_mode):
+                return metadata, walked
+            if index == len(relative.parts) - 1:
+                return metadata, None
+            if not stat.S_ISDIR(metadata.st_mode):
+                return None, None
+            descriptor = os.open(
+                part,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=current,
+            )
+            os.close(current)
+            current = descriptor
+        return os.fstat(current), None
+    finally:
+        os.close(current)
+
+
 def read_bounded_metadata(path: Path, label: str, maximum: int) -> str:
     flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -111,15 +210,59 @@ def read_bounded_metadata(path: Path, label: str, maximum: int) -> str:
         raise AuditError(f"{label} is not valid UTF-8") from exc
 
 
-def _git_directories(root: Path, deadline: float) -> tuple[Path, Path] | None:
+def read_bounded_relative_metadata(
+    anchor: RootAnchor, relative: Path, label: str, maximum: int
+) -> str:
+    parent = open_relative_directory(anchor, relative.parent)
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            relative.name,
+            os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+            dir_fd=parent,
+        )
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise AuditError(f"{label} is not a regular file")
+        if metadata.st_size > maximum:
+            raise AuditError(f"{label} exceeds {maximum} bytes")
+        data = bytearray()
+        while len(data) <= maximum:
+            chunk = os.read(descriptor, min(64 * 1024, maximum + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+        if len(data) > maximum:
+            raise AuditError(f"{label} exceeds {maximum} bytes")
+        try:
+            return bytes(data).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise AuditError(f"{label} is not valid UTF-8") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent)
+
+
+def _git_directories(
+    root: Path, anchor: RootAnchor, deadline: float
+) -> tuple[Path, Path] | None:
     ensure_before_deadline(deadline)
     dot_git = root / ".git"
-    if dot_git.is_symlink():
+    try:
+        dot_git_metadata = os.stat(
+            ".git", dir_fd=anchor.descriptor, follow_symlinks=False
+        )
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(dot_git_metadata.st_mode):
         raise AuditError(".git is a symbolic link; refusing to load repository metadata")
-    if dot_git.is_dir():
+    if stat.S_ISDIR(dot_git_metadata.st_mode):
         worktree_git_dir = dot_git
-    elif dot_git.is_file():
-        marker = read_bounded_metadata(dot_git, ".git indirection", 4096).strip()
+    elif stat.S_ISREG(dot_git_metadata.st_mode):
+        marker = read_bounded_relative_metadata(
+            anchor, Path(".git"), ".git indirection", 4096
+        ).strip()
         if not marker.startswith("gitdir: "):
             raise AuditError("invalid .git indirection")
         worktree_git_dir = Path(marker[8:])
@@ -128,10 +271,18 @@ def _git_directories(root: Path, deadline: float) -> tuple[Path, Path] | None:
         worktree_git_dir = worktree_git_dir.resolve()
         if not worktree_git_dir.is_dir():
             raise AuditError(".git indirection does not name a directory")
-    elif dot_git.exists():
-        raise AuditError("unsupported .git metadata type")
+        backlink_path = worktree_git_dir / "gitdir"
+        if not backlink_path.is_file() or backlink_path.is_symlink():
+            raise AuditError(".git indirection is not linked-worktree metadata")
+        backlink = Path(
+            read_bounded_metadata(backlink_path, "Git worktree backlink", 4096).strip()
+        )
+        if not backlink.is_absolute():
+            backlink = worktree_git_dir / backlink
+        if backlink.resolve() != dot_git.resolve():
+            raise AuditError("Git worktree backlink does not match the audit target")
     else:
-        return None
+        raise AuditError("unsupported .git metadata type")
 
     common_git_dir = worktree_git_dir
     commondir = worktree_git_dir / "commondir"
@@ -144,6 +295,11 @@ def _git_directories(root: Path, deadline: float) -> tuple[Path, Path] | None:
         common_git_dir = common_git_dir.resolve()
     if not common_git_dir.is_dir() or not (common_git_dir / "objects").is_dir():
         raise AuditError("Git object directory is missing")
+    if stat.S_ISREG(dot_git_metadata.st_mode) and (
+        worktree_git_dir.parent.resolve() != (common_git_dir / "worktrees").resolve()
+    ):
+        raise AuditError(".git indirection is outside linked-worktree metadata")
+    anchor.verify()
     return worktree_git_dir, common_git_dir
 
 
@@ -212,10 +368,22 @@ def _read_head(worktree_git_dir: Path, common_git_dir: Path) -> str:
 class SafeGit:
     """Run read-only Git queries without loading any target-controlled config."""
 
-    def __init__(self, root: Path, deadline: float | None = None):
+    def __init__(
+        self,
+        root: Path,
+        deadline: float | None = None,
+        anchor: RootAnchor | None = None,
+    ):
         self.root = root
         self.deadline = deadline or (time.monotonic() + AUDIT_TIMEOUT_SECONDS)
-        directories = _git_directories(root, self.deadline)
+        self.anchor = anchor or RootAnchor(root)
+        self._owns_anchor = anchor is None
+        try:
+            directories = _git_directories(root, self.anchor, self.deadline)
+        except BaseException:
+            if self._owns_anchor:
+                self.anchor.close()
+            raise
         self.is_repository = directories is not None
         self.worktree_count = 0
         self._temporary: tempfile.TemporaryDirectory[str] | None = None
@@ -256,7 +424,7 @@ class SafeGit:
             config_lines.extend(f"\t{key} = {value}" for key, value in sorted(extensions.items()))
         (isolated / "config").write_text("\n".join(config_lines) + "\n", encoding="utf-8")
         (isolated / "HEAD").write_text(
-            f"{_read_head(self.worktree_git_dir, self.common_git_dir)}\n", encoding="ascii"
+            f"{_read_head(self.worktree_git_dir, self.common_git_dir)}\n", encoding="utf-8"
         )
         if extensions.get("refstorage") == "reftable":
             reftable = self.common_git_dir / "reftable"
@@ -286,11 +454,14 @@ class SafeGit:
     def __exit__(self, *_: object) -> None:
         if self._temporary is not None:
             self._temporary.cleanup()
+        if self._owns_anchor:
+            self.anchor.close()
 
     def run(self, *args: str) -> str:
         if not self.is_repository or self._environment is None:
             raise AuditError("Git query requested outside an isolated repository context")
         ensure_before_deadline(self.deadline)
+        self.anchor.verify()
         try:
             process = subprocess.Popen(
                 [
@@ -359,6 +530,7 @@ class SafeGit:
             detail = stderr.strip().splitlines()
             suffix = f": {detail[0]}" if detail else ""
             raise AuditError(f"Git {' '.join(args)} failed{suffix}")
+        self.anchor.verify()
         return stdout
 
 
@@ -369,7 +541,64 @@ def load_signatures() -> dict[str, Any]:
     return data
 
 
-def tracked_files(root: Path, git: SafeGit, deadline: float) -> list[Path]:
+def bounded_walk(
+    root: Path,
+    anchor: RootAnchor,
+    start: Path,
+    deadline: float,
+    label: str,
+    budget: dict[str, int] | None = None,
+) -> list[tuple[Path, bool]]:
+    """Stream a deterministic, no-follow tree inventory below an anchored root."""
+    state = budget if budget is not None else {"paths": 0, "bytes": 0}
+    pending = [start]
+    entries_found: list[tuple[Path, bool]] = []
+    while pending:
+        ensure_before_deadline(deadline)
+        relative_directory = pending.pop()
+        try:
+            descriptor = open_relative_directory(anchor, relative_directory)
+        except OSError as exc:
+            if relative_directory == start and exc.errno in (
+                errno.ENOENT,
+                errno.ENOTDIR,
+                errno.ELOOP,
+            ):
+                return []
+            raise AuditError(
+                f"{label} directory changed during inspection: "
+                f"{relative_directory.as_posix() or '.'}"
+            ) from exc
+        directories: list[Path] = []
+        try:
+            with os.scandir(descriptor) as scanned:
+                for entry in scanned:
+                    ensure_before_deadline(deadline)
+                    relative = relative_directory / entry.name
+                    state["paths"] += 1
+                    state["bytes"] += len(relative.as_posix().encode("utf-8"))
+                    if state["paths"] > MAX_SCAN_PATHS:
+                        raise AuditError(f"{label} path count exceeds {MAX_SCAN_PATHS}")
+                    if state["bytes"] > MAX_SCAN_PATH_BYTES:
+                        raise AuditError(
+                            f"{label} paths exceed {MAX_SCAN_PATH_BYTES} bytes"
+                        )
+                    if entry.is_dir(follow_symlinks=False):
+                        if entry.name not in SKIPPED_PARTS:
+                            directories.append(relative)
+                    else:
+                        entries_found.append((root / relative, entry.is_symlink()))
+        finally:
+            os.close(descriptor)
+        pending.extend(sorted(directories, reverse=True))
+    return sorted(
+        entries_found, key=lambda item: item[0].relative_to(root).as_posix()
+    )
+
+
+def tracked_files(
+    root: Path, git: SafeGit, anchor: RootAnchor, deadline: float
+) -> list[Path]:
     if git.is_repository:
         output = git.run("ls-files", "-z", "--cached", "--others", "--exclude-standard")
         items = [item for item in output.split("\0") if item]
@@ -382,22 +611,12 @@ def tracked_files(root: Path, git: SafeGit, deadline: float) -> list[Path]:
             if candidate.is_absolute() or ".." in candidate.parts:
                 raise AuditError(f"Git returned unsafe path: {item}")
         return sorted((root / item for item in items), key=lambda item: item.relative_to(root).as_posix())
-    candidates: list[Path] = []
-    path_bytes = 0
-    for directory, names, files in os.walk(root, followlinks=False):
-        ensure_before_deadline(deadline)
-        names[:] = sorted(name for name in names if name not in SKIPPED_PARTS)
-        base = Path(directory)
-        additions = [base / name for name in sorted(files)]
-        additions.extend(base / name for name in names if (base / name).is_symlink())
-        for candidate in additions:
-            path_bytes += len(candidate.relative_to(root).as_posix().encode("utf-8"))
-            if len(candidates) >= MAX_SCAN_PATHS:
-                raise AuditError(f"scan candidate count exceeds {MAX_SCAN_PATHS}")
-            if path_bytes > MAX_SCAN_PATH_BYTES:
-                raise AuditError(f"scan candidate paths exceed {MAX_SCAN_PATH_BYTES} bytes")
-            candidates.append(candidate)
-    return sorted(candidates, key=lambda item: item.relative_to(root).as_posix())
+    return [
+        path
+        for path, _ in bounded_walk(
+            root, anchor, Path(), deadline, "scan candidate"
+        )
+    ]
 
 
 def content_excluded(path: Path, root: Path) -> bool:
@@ -411,24 +630,29 @@ def content_excluded(path: Path, root: Path) -> bool:
     return False
 
 
-def read_candidate_text(root: Path, path: Path) -> tuple[str | None, str | None]:
+def read_candidate_text(
+    root: Path, anchor: RootAnchor, path: Path
+) -> tuple[str | None, str | None]:
     relative = path.relative_to(root)
     if relative.is_absolute() or ".." in relative.parts or not relative.parts:
         raise AuditError(f"unsafe scan candidate: {relative.as_posix()}")
-    if content_excluded(path, root):
-        return None, None
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     no_follow = getattr(os, "O_NOFOLLOW", 0)
-    if not no_follow and first_symlink(root, path) is not None:
+    if not no_follow and inspect_relative(anchor, relative)[1] is not None:
         return None, "symlink"
     descriptors: list[int] = []
     try:
-        current = os.open(root, directory_flags)
+        anchor.verify()
+        current = os.dup(anchor.descriptor)
         descriptors.append(current)
         for part in relative.parts[:-1]:
             current = os.open(part, directory_flags | no_follow, dir_fd=current)
             descriptors.append(current)
-        descriptor = os.open(relative.parts[-1], os.O_RDONLY | no_follow, dir_fd=current)
+        descriptor = os.open(
+            relative.parts[-1],
+            os.O_RDONLY | os.O_NONBLOCK | no_follow,
+            dir_fd=current,
+        )
         descriptors.append(descriptor)
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
@@ -448,7 +672,7 @@ def read_candidate_text(root: Path, path: Path) -> tuple[str | None, str | None]
         except UnicodeDecodeError:
             return None, "non-utf8"
     except OSError as exc:
-        if exc.errno == errno.ELOOP or first_symlink(root, path) is not None:
+        if exc.errno == errno.ELOOP or inspect_relative(anchor, relative)[1] is not None:
             return None, "symlink"
         return None, f"unreadable:{exc.errno}"
     finally:
@@ -482,25 +706,64 @@ def add_finding(
     )
 
 
-def first_symlink(root: Path, path: Path) -> Path | None:
-    relative = path.relative_to(root)
-    current = root
-    for part in relative.parts:
-        current /= part
-        if current.is_symlink():
-            return current
-    return None
-
-
-def safe_explicit_file(
+def read_explicit_text(
     root: Path,
+    anchor: RootAnchor,
     path: Path,
     findings: list[dict[str, Any]],
     finding_id: str,
     label: str,
-) -> bool:
-    symlink = first_symlink(root, path)
-    if symlink is not None:
+) -> str | None:
+    relative = path.relative_to(root)
+    if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+        raise AuditError(f"unsafe explicit input: {relative.as_posix()}")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY
+    descriptors: list[int] = []
+    try:
+        anchor.verify()
+        current = os.dup(anchor.descriptor)
+        descriptors.append(current)
+        for part in relative.parts[:-1]:
+            current = os.open(part, directory_flags | os.O_NOFOLLOW, dir_fd=current)
+            descriptors.append(current)
+        descriptor = os.open(
+            relative.parts[-1],
+            os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+            dir_fd=current,
+        )
+        descriptors.append(descriptor)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise AuditError(f"explicit input is not a regular file: {relative.as_posix()}")
+        if metadata.st_size > MAX_FILE_SIZE:
+            raise AuditError(
+                f"explicit input exceeds {MAX_FILE_SIZE} bytes: {relative.as_posix()}"
+            )
+        data = bytearray()
+        while len(data) <= MAX_FILE_SIZE:
+            chunk = os.read(
+                descriptor, min(64 * 1024, MAX_FILE_SIZE + 1 - len(data))
+            )
+            if not chunk:
+                break
+            data.extend(chunk)
+        if len(data) > MAX_FILE_SIZE:
+            raise AuditError(
+                f"explicit input exceeds {MAX_FILE_SIZE} bytes: {relative.as_posix()}"
+            )
+        try:
+            return bytes(data).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise AuditError(
+                f"cannot read explicit input {relative.as_posix()} as UTF-8: {exc}"
+            ) from exc
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        _, symlink_relative = inspect_relative(anchor, relative)
+        symlink = root / symlink_relative if symlink_relative is not None else None
+        if symlink is None:
+            raise AuditError(f"cannot read explicit input {relative.as_posix()}: {exc}") from exc
         add_finding(
             findings,
             finding_id,
@@ -508,35 +771,21 @@ def safe_explicit_file(
             "scope",
             f"{label} is a symbolic link and was not followed.",
             "Inspect the link target explicitly before including it in an adoption audit.",
-            [symlink.relative_to(root).as_posix()],
+            [(symlink or path).relative_to(root).as_posix()],
             "approval-required",
         )
-        return False
-    if not path.exists():
-        return False
+        return None
+    finally:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def enabled_plugins_from_settings(root: Path, path: Path, text: str) -> dict[str, bool]:
     try:
-        metadata = path.lstat()
-    except OSError as exc:
-        raise AuditError(f"cannot inspect explicit input {path.relative_to(root)}: {exc}") from exc
-    if not stat.S_ISREG(metadata.st_mode):
-        raise AuditError(f"explicit input is not a regular file: {path.relative_to(root)}")
-    if metadata.st_size > MAX_FILE_SIZE:
-        raise AuditError(
-            f"explicit input exceeds {MAX_FILE_SIZE} bytes: {path.relative_to(root)}"
-        )
-    return True
-
-
-def read_explicit_text(root: Path, path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise AuditError(f"cannot read explicit input {path.relative_to(root)} as UTF-8: {exc}") from exc
-
-
-def enabled_plugins_from_settings(root: Path, path: Path) -> dict[str, bool]:
-    try:
-        settings = json.loads(read_explicit_text(root, path))
+        settings = json.loads(text)
     except json.JSONDecodeError as exc:
         raise AuditError(f"invalid runtime settings JSON in {path.relative_to(root)}: {exc}") from exc
     if not isinstance(settings, dict):
@@ -559,71 +808,81 @@ def enabled_plugins_from_settings(root: Path, path: Path) -> dict[str, bool]:
             f"enabledPlugins exceeds {MAX_ENABLED_PLUGINS} entries: {path.relative_to(root)}"
         )
     for selector in selectors:
-        if not selector or len(selector) > MAX_PLUGIN_ID_LENGTH:
+        if not selector.strip() or len(selector) > MAX_PLUGIN_ID_LENGTH:
             raise AuditError(f"invalid enabled plugin identifier in {path.relative_to(root)}")
     return selectors
 
 
-def ignored_memory_integrations(root: Path, runtime_root: str, deadline: float) -> list[str]:
+def ignored_memory_integrations(
+    root: Path,
+    anchor: RootAnchor,
+    runtime_root: str,
+    deadline: float,
+) -> list[str]:
     integrations: list[str] = []
-    inspected = 0
-    path_bytes = 0
+    budget = {"paths": 0, "bytes": 0}
     for relative_root in (Path(runtime_root), Path("scripts")):
-        start = root / relative_root
-        if not start.is_dir() or start.is_symlink():
-            continue
-        for directory, names, files in os.walk(start, followlinks=False):
-            ensure_before_deadline(deadline)
-            names[:] = sorted(name for name in names if name not in SKIPPED_PARTS)
-            base = Path(directory)
-            for name in names:
-                candidate = base / name
-                relative = candidate.relative_to(root)
-                inspected += 1
-                path_bytes += len(relative.as_posix().encode("utf-8"))
-                if inspected > MAX_SCAN_PATHS or path_bytes > MAX_SCAN_PATH_BYTES:
-                    raise AuditError("memory integration scan exceeds repository bounds")
-                if candidate.is_symlink() and any(
-                    "memory" in part.lower() for part in relative.parts
-                ):
-                    integrations.append(relative.as_posix())
-            for name in sorted(files):
-                candidate = base / name
-                relative = candidate.relative_to(root)
-                inspected += 1
-                path_bytes += len(relative.as_posix().encode("utf-8"))
-                if inspected > MAX_SCAN_PATHS or path_bytes > MAX_SCAN_PATH_BYTES:
-                    raise AuditError("memory integration scan exceeds repository bounds")
-                if "memory" in name.lower() and "link" in name.lower():
-                    integrations.append(relative.as_posix())
+        for candidate, is_symlink in bounded_walk(
+            root,
+            anchor,
+            relative_root,
+            deadline,
+            "memory integration scan",
+            budget,
+        ):
+            relative = candidate.relative_to(root)
+            if is_symlink and any("memory" in part.lower() for part in relative.parts):
+                integrations.append(relative.as_posix())
+            elif "memory" in candidate.name.lower() and "link" in candidate.name.lower():
+                integrations.append(relative.as_posix())
     return integrations
 
 
 def content_pattern_matches(
-    pattern_id: str, pattern: re.Pattern[str], path: Path, line: str
+    pattern_id: str,
+    pattern: re.Pattern[str],
+    path: Path,
+    line: str,
+    in_code_block: bool = False,
 ) -> bool:
-    match = pattern.search(line)
-    if match is None:
+    matches = list(pattern.finditer(line))
+    if not matches:
         return False
     if pattern_id != "claude-cli" or path.suffix.lower() not in PROSE_SUFFIXES:
         return True
-    stripped = line.strip()
-    match = pattern.search(stripped)
-    if match is None:
-        return False
-    if match.start() == 0:
-        return any(character.isspace() for character in stripped)
-    return stripped[match.start() - 1] in ";&|"
+    if in_code_block:
+        return True
+    code_spans = [match.span(2) for match in re.finditer(r"(`+)(.*?)\1", line)]
+    for match in matches:
+        if any(start <= match.start() and match.end() <= end for start, end in code_spans):
+            return True
+        prefix = line[: match.start()]
+        if re.fullmatch(r"\s*(?:>\s*)*(?:(?:[-+*]|\d+[.)])\s+)?", prefix):
+            suffix = line[match.end() :]
+            if suffix.strip() or prefix.strip():
+                return True
+        if match.start() > 0 and line[match.start() - 1] in ";&|":
+            return True
+    return False
 
 
 def audit(root: Path, signatures: dict[str, Any]) -> dict[str, Any]:
+    if not secure_io_supported():
+        raise AuditError(
+            "project-adoption requires POSIX descriptor-relative no-follow file I/O"
+        )
     deadline = time.monotonic() + AUDIT_TIMEOUT_SECONDS
-    with SafeGit(root, deadline) as git:
-        return audit_in_context(root, signatures, git, deadline)
+    with RootAnchor(root) as anchor:
+        with SafeGit(root, deadline, anchor) as git:
+            return audit_in_context(root, signatures, git, anchor, deadline)
 
 
 def audit_in_context(
-    root: Path, signatures: dict[str, Any], git: SafeGit, deadline: float
+    root: Path,
+    signatures: dict[str, Any],
+    git: SafeGit,
+    anchor: RootAnchor,
+    deadline: float,
 ) -> dict[str, Any]:
     paths = signatures["paths"]
     is_git = git.is_repository
@@ -643,23 +902,30 @@ def audit_in_context(
 
     agent_path = root / paths["agent_guidance"]
     reference_path = root / paths["reference_guidance"]
-    agent_present = agent_path.exists() or agent_path.is_symlink()
-    agent_safe = safe_explicit_file(
-        root, agent_path, findings, "agents-guidance-symlink", "Shared agent guidance"
+    agent_text = read_explicit_text(
+        root,
+        anchor,
+        agent_path,
+        findings,
+        "agents-guidance-symlink",
+        "Shared agent guidance",
     )
-    if not agent_present:
-        add_finding(
-            findings,
-            "agents-guidance-missing",
-            "warning",
-            "guidance",
-            "Shared agent guidance is missing.",
-            "Draft an agent-neutral AGENTS.md and show it before writing.",
-            change_class="safe-scaffolding",
-        )
-    elif agent_safe:
+    agent_link_reported = any(
+        finding["id"] == "agents-guidance-symlink" for finding in findings
+    )
+    if agent_text is None:
+        if not agent_link_reported:
+            add_finding(
+                findings,
+                "agents-guidance-missing",
+                "warning",
+                "guidance",
+                "Shared agent guidance is missing.",
+                "Draft an agent-neutral AGENTS.md and show it before writing.",
+                change_class="safe-scaffolding",
+            )
+    else:
         inventory["agentGuidance"] = True
-        agent_text = read_explicit_text(root, agent_path)
         matches = [
             pattern
             for pattern in signatures["agent_specific_patterns"]
@@ -677,16 +943,18 @@ def audit_in_context(
                 "approval-required",
             )
 
-    if safe_explicit_file(
+    reference_text = read_explicit_text(
         root,
+        anchor,
         reference_path,
         findings,
         "reference-guidance-symlink",
         "Reference-runtime guidance",
-    ):
+    )
+    if reference_text is not None:
         inventory["referenceGuidance"] = True
         imports: list[str] = []
-        for number, line in enumerate(read_explicit_text(root, reference_path).splitlines(), 1):
+        for number, line in enumerate(reference_text.splitlines(), 1):
             if line.lstrip().startswith("@"):
                 imports.append(f"{paths['reference_guidance']}:{number}")
         add_finding(
@@ -708,8 +976,8 @@ def audit_in_context(
         ("tasks", "task-backlog-present", "A task backlog is present."),
     ):
         candidate = root / paths[key]
-        symlink = first_symlink(root, candidate)
-        if symlink is not None and symlink == candidate:
+        metadata, symlink_relative = inspect_relative(anchor, Path(paths[key]))
+        if symlink_relative is not None and symlink_relative == Path(paths[key]):
             inventory[key] = True
             add_finding(
                 findings,
@@ -720,9 +988,18 @@ def audit_in_context(
                 "Preserve the link and inspect its target explicitly before migration.",
                 [paths[key]],
             )
-        elif symlink is not None:
-            continue
-        elif candidate.exists():
+        elif symlink_relative is not None:
+            add_finding(
+                findings,
+                f"{finding_id}-ancestor-symlink",
+                "warning",
+                "scope",
+                f"{message} could not be inventoried because an ancestor is a symbolic link.",
+                "Inspect the link target explicitly before relying on project-state coverage.",
+                [paths[key], symlink_relative.as_posix()],
+                "approval-required",
+            )
+        elif metadata is not None:
             inventory[key] = True
             add_finding(
                 findings,
@@ -742,8 +1019,11 @@ def audit_in_context(
         ("settings_local", "runtime-local-settings-symlink", "Local runtime settings"),
     ):
         settings_path = root / paths[settings_key]
-        if safe_explicit_file(root, settings_path, findings, finding_id, label):
-            configured = enabled_plugins_from_settings(root, settings_path)
+        settings_text = read_explicit_text(
+            root, anchor, settings_path, findings, finding_id, label
+        )
+        if settings_text is not None:
+            configured = enabled_plugins_from_settings(root, settings_path, settings_text)
             configured_selectors.update(configured)
             enabled_state.update(configured)
             settings_evidence.append(paths[settings_key])
@@ -751,6 +1031,25 @@ def audit_in_context(
     inventory["enabledPlugins"] = sorted(
         selector for selector, enabled in enabled_state.items() if enabled
     )
+    configured_workflows = sorted(
+        name
+        for name in WORKFLOW_PLUGIN_NAMES
+        if any(
+            selector == name or selector.startswith(f"{name}@")
+            for selector in inventory["configuredPlugins"]
+        )
+    )
+    inventory["configuredWorkflowPlugins"] = configured_workflows
+    if configured_workflows:
+        add_finding(
+            findings,
+            "workflow-plugin-configuration",
+            "info",
+            "plugins",
+            "Runtime settings configure workflow plugins, including disabled declarations.",
+            "Map configured capabilities and preserve enabled or disabled state explicitly.",
+            settings_evidence,
+        )
     if inventory["enabledPlugins"]:
         add_finding(
             findings,
@@ -762,7 +1061,7 @@ def audit_in_context(
             settings_evidence,
         )
 
-    candidates = tracked_files(root, git, deadline)
+    candidates = tracked_files(root, git, anchor, deadline)
     memory_integrations: list[str] = []
     for path in candidates:
         relative = path.relative_to(root)
@@ -770,10 +1069,11 @@ def audit_in_context(
             continue
         has_memory_name = any("memory" in part.lower() for part in relative.parts)
         is_link_helper = "memory" in path.name.lower() and "link" in path.name.lower()
-        if is_link_helper or (path.is_symlink() and has_memory_name):
+        _, symlink_relative = inspect_relative(anchor, relative)
+        if is_link_helper or (symlink_relative is not None and has_memory_name):
             memory_integrations.append(relative.as_posix())
     memory_integrations.extend(
-        ignored_memory_integrations(root, paths["runtime_root"], deadline)
+        ignored_memory_integrations(root, anchor, paths["runtime_root"], deadline)
     )
     memory_integrations = sorted(set(memory_integrations))[:MAX_EVIDENCE_PER_PATTERN]
     inventory["memoryIntegrationPaths"] = memory_integrations
@@ -798,15 +1098,19 @@ def audit_in_context(
     for plugin_name, evidence in plugin_evidence.items():
         if any(
             selector == plugin_name or selector.startswith(f"{plugin_name}@")
-            for selector in inventory["configuredPlugins"]
+            for selector in inventory["enabledPlugins"]
         ):
             evidence.extend(settings_evidence)
     unscanned_count = 0
+    policy_excluded_count = 0
     unscanned_evidence: list[str] = []
     scanned_content_bytes = 0
     for candidate_index, path in enumerate(candidates):
         ensure_before_deadline(deadline)
-        text, reason = read_candidate_text(root, path)
+        if content_excluded(path, root):
+            policy_excluded_count += 1
+            continue
+        text, reason = read_candidate_text(root, anchor, path)
         if reason is not None:
             unscanned_count += 1
             if len(unscanned_evidence) < MAX_EVIDENCE_PER_PATTERN:
@@ -815,9 +1119,18 @@ def audit_in_context(
             continue
         content_bytes = len(text.encode("utf-8"))
         if scanned_content_bytes + content_bytes > MAX_SCANNED_CONTENT_BYTES:
-            remaining = len(candidates) - candidate_index
-            unscanned_count += remaining
-            for skipped in candidates[candidate_index:]:
+            remaining = [
+                skipped
+                for skipped in candidates[candidate_index:]
+                if not content_excluded(skipped, root)
+            ]
+            policy_excluded_count += sum(
+                1
+                for skipped in candidates[candidate_index:]
+                if content_excluded(skipped, root)
+            )
+            unscanned_count += len(remaining)
+            for skipped in remaining:
                 if len(unscanned_evidence) >= MAX_EVIDENCE_PER_PATTERN:
                     break
                 unscanned_evidence.append(
@@ -826,22 +1139,43 @@ def audit_in_context(
             break
         scanned_content_bytes += content_bytes
         relative = path.relative_to(root).as_posix()
+        fence_marker: str | None = None
         for line_number, line in enumerate(text.splitlines(), 1):
+            stripped_line = line.lstrip()
+            fence_match = re.match(r"(`{3,}|~{3,})", stripped_line)
+            fence_line = False
+            if fence_match is not None:
+                marker = fence_match.group(1)
+                if fence_marker is None:
+                    fence_line = True
+                elif (
+                    marker[0] == fence_marker[0]
+                    and len(marker) >= len(fence_marker)
+                    and not stripped_line[fence_match.end() :].strip()
+                ):
+                    fence_line = True
+            scan_as_code = fence_marker is not None and not fence_line
             for pattern_id, _, pattern in compiled:
                 evidence = pattern_evidence[pattern_id]
                 if (
                     len(evidence) < MAX_EVIDENCE_PER_PATTERN
-                    and content_pattern_matches(pattern_id, pattern, path, line)
+                    and content_pattern_matches(
+                        pattern_id, pattern, path, line, scan_as_code
+                    )
                 ):
                     evidence.append(f"{relative}:{line_number}")
             for plugin_name, evidence in plugin_evidence.items():
                 if (
-                    len(evidence) < MAX_EVIDENCE_PER_PATTERN
+                    relative not in settings_evidence
+                    and len(evidence) < MAX_EVIDENCE_PER_PATTERN
                     and re.search(rf"(?<![A-Za-z0-9_-]){re.escape(plugin_name)}(?![A-Za-z0-9_-])", line)
                 ):
                     evidence.append(f"{relative}:{line_number}")
+            if fence_line:
+                fence_marker = None if fence_marker is not None else marker
 
     inventory["unscannedFileCount"] = unscanned_count
+    inventory["policyExcludedFileCount"] = policy_excluded_count
     inventory["scannedContentBytes"] = scanned_content_bytes
     if unscanned_count:
         add_finding(
@@ -898,6 +1232,7 @@ def audit_in_context(
             change_class="preserve",
         )
 
+    anchor.verify()
     counts = Counter(item["severity"] for item in findings)
     return {
         "schemaVersion": 1,
@@ -914,10 +1249,17 @@ def audit_in_context(
 
 
 def render_text(report: dict[str, Any]) -> str:
+    inventory = report["inventory"]
     lines = [
         "Project adoption audit (read-only)",
         f"Root: {report['root']}",
         f"Findings: {report['summary']['warning']} warning(s), {report['summary']['info']} info",
+        (
+            "Coverage: "
+            f"{inventory['scannedContentBytes']} content byte(s) scanned; "
+            f"{inventory['unscannedFileCount']} unscanned candidate(s); "
+            f"{inventory['policyExcludedFileCount']} policy-excluded candidate(s)"
+        ),
         "",
     ]
     for finding in report["findings"]:

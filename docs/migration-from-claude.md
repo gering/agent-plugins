@@ -19,6 +19,11 @@ Default behavior for an already configured project is a read-only report:
 The first fixture is `muellmann-app.de`. Audits must not deploy it, expose
 secrets, rewrite canonical knowledge, or mutate active worktrees.
 
+The current auditor requires a POSIX host. Its containment guarantees rely on
+descriptor-relative `open` calls with no-follow semantics; on platforms that do
+not provide those primitives, it fails closed with an explicit `AUDIT_ERROR`
+instead of silently weakening target isolation.
+
 Install and run the Codex audit from a new session:
 
 ```bash

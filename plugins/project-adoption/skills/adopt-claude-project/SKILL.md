@@ -8,6 +8,10 @@ description: Audit an existing Claude-oriented repository for safe Codex and Gro
 Audit first and keep the initial pass read-only. Preserve existing project
 knowledge, worktrees, tasks, and runtime configuration.
 
+Require a POSIX host with descriptor-relative no-follow file I/O. If the host
+does not provide it, report the platform limitation and do not run or weaken
+the audit.
+
 ## Run the audit
 
 1. Resolve the target repository from the user's explicit path or the current
@@ -26,6 +30,9 @@ knowledge, worktrees, tasks, and runtime configuration.
 4. Treat exit code 2 as an audit failure. Do not continue with migration
    recommendations based on partial output.
 5. Present the result under these headings:
+   - Coverage: report `scannedContentBytes`, `unscannedFileCount`, and
+     `policyExcludedFileCount` together. Never describe zero unscanned files as
+     complete coverage without also showing policy exclusions.
    - Already compatible: positive inventory signals that have no warning.
    - Preserve unchanged: findings whose `changeClass` is `preserve`.
    - Adapter or guidance gaps: all warning findings.
