@@ -215,13 +215,43 @@ class ProjectAdoptionTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         with module.SafeGit(self.root) as git_context:
-            with mock.patch.object(
-                module.subprocess,
-                "run",
-                side_effect=subprocess.TimeoutExpired("git", module.GIT_TIMEOUT_SECONDS),
-            ):
-                with self.assertRaises(module.AuditError):
-                    git_context.run("status", "--porcelain")
+            git_context.deadline = module.time.monotonic() - 1
+            with self.assertRaises(module.AuditError):
+                git_context.run("status", "--porcelain")
+
+    def test_fifo_git_head_fails_closed_without_blocking(self) -> None:
+        head = self.root / ".git/HEAD"
+        head.unlink()
+        os.mkfifo(head)
+        result = self.run_audit()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Git HEAD is not a regular file", result.stderr)
+
+    def test_candidate_count_is_bounded(self) -> None:
+        self.write("AGENTS.md", "Shared rules.\n")
+        self.write("one.txt", "one\n")
+        self.write("two.txt", "two\n")
+        spec = importlib.util.spec_from_file_location("audit_project_bound_test", AUDITOR)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with mock.patch.object(module, "MAX_SCAN_PATHS", 2):
+            with self.assertRaises(module.AuditError):
+                module.audit(self.root, module.load_signatures())
+
+    def test_total_content_budget_produces_scan_incomplete_finding(self) -> None:
+        self.write("AGENTS.md", "Shared rules.\n")
+        self.write("one.txt", "one\n")
+        spec = importlib.util.spec_from_file_location("audit_project_content_bound_test", AUDITOR)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with mock.patch.object(module, "MAX_SCANNED_CONTENT_BYTES", 1):
+            report = module.audit(self.root, module.load_signatures())
+        finding = next(item for item in report["findings"] if item["id"] == "scan-incomplete")
+        self.assertTrue(any(item.endswith(":scan-budget") for item in finding["evidence"]))
 
     def test_symlinked_settings_outside_target_are_not_read(self) -> None:
         self.write("AGENTS.md", "Shared rules.\n")
@@ -292,17 +322,98 @@ class ProjectAdoptionTests(unittest.TestCase):
 
     def test_claude_code_prose_is_not_a_cli_command(self) -> None:
         self.write("AGENTS.md", "Shared rules.\n")
-        self.write("docs/reference.md", "This project was originally used with Claude Code.\n")
+        self.write(
+            "docs/reference.md",
+            "This project was originally used with Claude Code.\nClaude\nAsk Claude \"$question\" for advice.\n",
+        )
         ids = {finding["id"] for finding in self.report()["findings"]}
         self.assertNotIn("hardcoded-claude-cli", ids)
 
-    def test_unreadable_utf8_candidate_fails_closed(self) -> None:
+    def test_unreadable_utf8_candidate_is_reported_as_scan_incomplete(self) -> None:
         self.write("AGENTS.md", "Shared rules.\n")
         path = self.root / "tracked.txt"
         path.write_bytes(b"\xff\xfe")
-        result = self.run_audit()
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("cannot scan tracked.txt as UTF-8", result.stderr)
+        report = self.report()
+        finding = next(item for item in report["findings"] if item["id"] == "scan-incomplete")
+        self.assertEqual(report["inventory"]["unscannedFileCount"], 1)
+        self.assertEqual(finding["evidence"], ["tracked.txt:non-utf8"])
+
+    def test_large_candidate_is_reported_without_aborting(self) -> None:
+        self.write("AGENTS.md", "Shared rules.\n")
+        self.write("generated.js", "x" * (256 * 1024 + 1))
+        report = self.report()
+        self.assertEqual(report["inventory"]["unscannedFileCount"], 1)
+        finding = next(item for item in report["findings"] if item["id"] == "scan-incomplete")
+        self.assertEqual(finding["evidence"], ["generated.js:oversize"])
+
+    def test_tracked_content_below_symlinked_parent_is_not_read(self) -> None:
+        self.write("AGENTS.md", "Shared rules.\n")
+        self.write("linked/secret.txt", "safe\n")
+        self.git("add", ".")
+        self.git("commit", "-q", "-m", "fixture")
+        shutil.rmtree(self.root / "linked")
+        external = Path(self.tempdir.name) / "external-linked"
+        external.mkdir()
+        (external / "secret.txt").write_text("exec claude --resume\n", encoding="utf-8")
+        (self.root / "linked").symlink_to(external, target_is_directory=True)
+        report = self.report()
+        ids = {finding["id"] for finding in report["findings"]}
+        self.assertNotIn("hardcoded-claude-cli", ids)
+        finding = next(item for item in report["findings"] if item["id"] == "scan-incomplete")
+        self.assertIn("linked/secret.txt:symlink", finding["evidence"])
+
+    def test_disabled_workflow_plugin_declarations_remain_in_inventory(self) -> None:
+        self.write("AGENTS.md", "Shared rules.\n")
+        self.write(
+            ".claude/settings.local.json",
+            json.dumps({"enabledPlugins": {"knowledge-system@market": False}}),
+        )
+        report = self.report()
+        self.assertEqual(report["inventory"]["enabledPlugins"], [])
+        self.assertEqual(
+            report["inventory"]["configuredPlugins"], ["knowledge-system@market"]
+        )
+        self.assertEqual(
+            report["inventory"]["referencedWorkflowPlugins"], ["knowledge-system"]
+        )
+
+    def test_sha256_repository_is_audited_when_supported(self) -> None:
+        shutil.rmtree(self.root / ".git")
+        result = subprocess.run(
+            ["git", "init", "--object-format=sha256", "-q", "-b", "main", str(self.root)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            self.skipTest("installed Git does not support SHA-256 repositories")
+        self.git("config", "user.name", "Test")
+        self.git("config", "user.email", "test@example.com")
+        self.write("AGENTS.md", "Shared rules.\n")
+        self.git("add", ".")
+        self.git("commit", "-q", "-m", "fixture")
+        report = self.report()
+        self.assertTrue(report["inventory"]["gitRepository"])
+        self.assertEqual(report["inventory"]["dirtyPathCount"], 0)
+
+    def test_reftable_repository_is_audited_when_supported(self) -> None:
+        shutil.rmtree(self.root / ".git")
+        result = subprocess.run(
+            ["git", "init", "--ref-format=reftable", "-q", "-b", "main", str(self.root)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            self.skipTest("installed Git does not support reftable repositories")
+        self.git("config", "user.name", "Test")
+        self.git("config", "user.email", "test@example.com")
+        self.write("AGENTS.md", "Shared rules.\n")
+        self.git("add", ".")
+        self.git("commit", "-q", "-m", "fixture")
+        report = self.report()
+        self.assertTrue(report["inventory"]["gitRepository"])
+        self.assertEqual(report["inventory"]["dirtyPathCount"], 0)
 
     def test_non_git_evidence_order_is_deterministic(self) -> None:
         shutil.rmtree(self.root / ".git")

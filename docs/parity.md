@@ -7,10 +7,10 @@ scaffolding alone does not qualify.
 ## Upstream baseline
 
 - Claude source: [`gering/claude-plugins`](https://github.com/gering/claude-plugins)
-- Last reviewed commit: `87917b5f3e6de28d2b550ee9e6ce0f7c62a441bd`
-- Last sync review: 2026-07-12
+- Last reviewed commit: `390c1caa2ddd1230c4dc5cee7be40f30fae1d3f2`
+- Last sync review: 2026-07-13
 - Dirty upstream files and untracked directories were excluded from the review.
-- Latest observed upstream `main`: `87917b5f3e6de28d2b550ee9e6ce0f7c62a441bd`.
+- Latest observed upstream `main`: `390c1caa2ddd1230c4dc5cee7be40f30fae1d3f2`.
   Run `python3 scripts/check-upstream.py` to audit it against the locally
   cached sibling `origin/main`; refresh remote refs separately for network
   freshness.
@@ -23,19 +23,22 @@ with opt-in `--fix`, `--loop`, and deepest-effort review behavior. The merged
 commit was reviewed on 2026-07-12; dirty sibling files remained excluded and
 no implementation was imported. Later knowledge-only reindex and link fixes
 through `87917b5` were also reviewed without changing source plugin versions or
-native mappings. The planned native mapping is tracked in
-`tasks/port-swarm-p5.md` and `tasks/add-opus-to-swarm.md`.
+native mappings. Claude PR #27 then aligned pr-flow's review-table semantics
+with the swarm findings-table family and advanced pr-flow to 1.2.3; that
+format-only behavior was reviewed at `390c1ca` without importing it. The
+planned native mapping is tracked in `tasks/port-swarm-p5.md` and
+`tasks/add-opus-to-swarm.md`.
 
 Allowed states are `missing`, `planned`, `partial`, `parity`, and
 `intentional-divergence`.
 
 | Plugin | Claude source | Codex status | Grok status | Last sync | Differences | Evidence |
 |---|---|---|---|---|---|---|
-| project-adoption | New companion capability; no single Claude plugin source | partial | planned | 2026-07-12 / `87917b5f3e6de28d2b550ee9e6ce0f7c62a441bd` | Codex ships a read-only native audit; Grok adapter and approved apply mode remain planned. | 80 deterministic tests; native manifest validation; isolated Codex install; fresh-session skill discovery and non-mutating audit of `muellmann-app.de` with expected guidance, knowledge, memory, plugin, and worktree findings. |
-| knowledge-system | 1.8.2 at `87917b5f3e6de28d2b550ee9e6ce0f7c62a441bd` | planned | planned | 2026-07-12 / `87917b5f3e6de28d2b550ee9e6ce0f7c62a441bd` | Native memories are local preference stores; versioned project knowledge remains canonical. | Both manifests validated; no skills imported. |
-| work-system | 1.6.0 at `87917b5f3e6de28d2b550ee9e6ce0f7c62a441bd` | planned | planned | 2026-07-12 / `87917b5f3e6de28d2b550ee9e6ce0f7c62a441bd` | Launch/resume will use native Codex and Grok/herdr commands. | Both manifests validated; no workflow tests. |
-| pr-flow | 1.2.2 at `87917b5f3e6de28d2b550ee9e6ce0f7c62a441bd` | planned | planned | 2026-07-12 / `87917b5f3e6de28d2b550ee9e6ce0f7c62a441bd` | Local review is separated from optional GitHub `@claude review`. | Both manifests validated; no workflow tests. |
-| swarm | 0.3.0 at `87917b5f3e6de28d2b550ee9e6ce0f7c62a441bd` | missing | missing | 2026-07-12 / `87917b5f3e6de28d2b550ee9e6ce0f7c62a441bd` | Evaluation deferred until core workflows are stable; P5 native mapping is planned but not imported. | Merged upstream behavior and later knowledge-only maintenance reviewed; no runtime implementation. |
+| project-adoption | New companion capability; no single Claude plugin source | partial | planned | 2026-07-13 / `390c1caa2ddd1230c4dc5cee7be40f30fae1d3f2` | Codex ships a read-only native audit; Grok adapter and approved apply mode remain planned. | 88 deterministic tests; native manifest validation; isolated Codex install; fresh-session skill discovery and non-mutating audit of `muellmann-app.de` with expected guidance, knowledge, memory, plugin, and worktree findings. |
+| knowledge-system | 1.8.2 at `390c1caa2ddd1230c4dc5cee7be40f30fae1d3f2` | planned | planned | 2026-07-13 / `390c1caa2ddd1230c4dc5cee7be40f30fae1d3f2` | Native memories are local preference stores; versioned project knowledge remains canonical. | Both manifests validated; no skills imported. |
+| work-system | 1.6.0 at `390c1caa2ddd1230c4dc5cee7be40f30fae1d3f2` | planned | planned | 2026-07-13 / `390c1caa2ddd1230c4dc5cee7be40f30fae1d3f2` | Launch/resume will use native Codex and Grok/herdr commands. | Both manifests validated; no workflow tests. |
+| pr-flow | 1.2.3 at `390c1caa2ddd1230c4dc5cee7be40f30fae1d3f2` | planned | planned | 2026-07-13 / `390c1caa2ddd1230c4dc5cee7be40f30fae1d3f2` | Local review is separated from optional GitHub `@claude review`; upstream's review-table alignment remains unported. | Both manifests validated; PR #27 format changes reviewed; no workflow tests. |
+| swarm | 0.3.0 at `390c1caa2ddd1230c4dc5cee7be40f30fae1d3f2` | missing | missing | 2026-07-13 / `390c1caa2ddd1230c4dc5cee7be40f30fae1d3f2` | Evaluation deferred until core workflows are stable; P5 native mapping is planned but not imported. | Merged upstream behavior, knowledge maintenance, and PR #27 table alignment reviewed; no runtime implementation. |
 
 ## Baseline limitations
 

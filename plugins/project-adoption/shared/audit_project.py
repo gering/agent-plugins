@@ -4,13 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import re
+import selectors
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -22,6 +25,13 @@ MAX_EVIDENCE_PER_PATTERN = 20
 MAX_ENABLED_PLUGINS = 100
 MAX_PLUGIN_ID_LENGTH = 256
 GIT_TIMEOUT_SECONDS = 10
+AUDIT_TIMEOUT_SECONDS = 30
+MAX_GIT_OUTPUT_BYTES = 8 * 1024 * 1024
+MAX_GIT_ERROR_BYTES = 64 * 1024
+MAX_GIT_METADATA_BYTES = 4 * 1024 * 1024
+MAX_SCAN_PATHS = 50_000
+MAX_SCAN_PATH_BYTES = 8 * 1024 * 1024
+MAX_SCANNED_CONTENT_BYTES = 16 * 1024 * 1024
 SKIPPED_PARTS = {
     ".git",
     ".worktrees",
@@ -59,23 +69,57 @@ SKIPPED_SUFFIXES = {
     ".zip",
 }
 WORKFLOW_PLUGIN_NAMES = ("knowledge-system", "pr-flow", "work-system")
+PROSE_SUFFIXES = {".md", ".mdx", ".rst", ".txt"}
 
 
 class AuditError(RuntimeError):
     """The audit could not complete safely and must fail closed."""
 
 
-def _git_directories(root: Path) -> tuple[Path, Path] | None:
+def ensure_before_deadline(deadline: float) -> None:
+    if time.monotonic() >= deadline:
+        raise AuditError(f"audit timed out after {AUDIT_TIMEOUT_SECONDS} seconds")
+
+
+def read_bounded_metadata(path: Path, label: str, maximum: int) -> str:
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise AuditError(f"cannot open {label}: {exc}") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise AuditError(f"{label} is not a regular file")
+        if metadata.st_size > maximum:
+            raise AuditError(f"{label} exceeds {maximum} bytes")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(64 * 1024, maximum + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > maximum:
+                raise AuditError(f"{label} exceeds {maximum} bytes")
+    finally:
+        os.close(descriptor)
+    try:
+        return b"".join(chunks).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise AuditError(f"{label} is not valid UTF-8") from exc
+
+
+def _git_directories(root: Path, deadline: float) -> tuple[Path, Path] | None:
+    ensure_before_deadline(deadline)
     dot_git = root / ".git"
     if dot_git.is_symlink():
         raise AuditError(".git is a symbolic link; refusing to load repository metadata")
     if dot_git.is_dir():
         worktree_git_dir = dot_git
     elif dot_git.is_file():
-        try:
-            marker = dot_git.read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeDecodeError) as exc:
-            raise AuditError(f"cannot read .git indirection: {exc}") from exc
+        marker = read_bounded_metadata(dot_git, ".git indirection", 4096).strip()
         if not marker.startswith("gitdir: "):
             raise AuditError("invalid .git indirection")
         worktree_git_dir = Path(marker[8:])
@@ -92,10 +136,9 @@ def _git_directories(root: Path) -> tuple[Path, Path] | None:
     common_git_dir = worktree_git_dir
     commondir = worktree_git_dir / "commondir"
     if commondir.is_file():
-        try:
-            common_git_dir = Path(commondir.read_text(encoding="utf-8").strip())
-        except (OSError, UnicodeDecodeError) as exc:
-            raise AuditError(f"cannot read Git commondir: {exc}") from exc
+        common_git_dir = Path(
+            read_bounded_metadata(commondir, "Git commondir", 4096).strip()
+        )
         if not common_git_dir.is_absolute():
             common_git_dir = worktree_git_dir / common_git_dir
         common_git_dir = common_git_dir.resolve()
@@ -104,12 +147,42 @@ def _git_directories(root: Path) -> tuple[Path, Path] | None:
     return worktree_git_dir, common_git_dir
 
 
+def _read_repository_format(common_git_dir: Path) -> dict[str, str]:
+    config_path = common_git_dir / "config"
+    if not config_path.exists():
+        return {}
+    text = read_bounded_metadata(config_path, "Git repository config", 256 * 1024)
+    section = ""
+    values: dict[str, str] = {}
+    approved = {
+        ("core", "repositoryformatversion"),
+        ("extensions", "objectformat"),
+        ("extensions", "refstorage"),
+    }
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        match = re.fullmatch(r"\[([A-Za-z0-9.-]+)(?:\s+\"[^\"]*\")?\]", line)
+        if match:
+            section = match.group(1).lower()
+            continue
+        if not line or line.startswith(("#", ";")) or "=" not in line:
+            continue
+        key, value = (part.strip() for part in line.split("=", 1))
+        normalized = (section, key.lower())
+        if normalized in approved:
+            values[f"{section}.{key.lower()}"] = value.lower()
+    object_format = values.get("extensions.objectformat", "sha1")
+    ref_storage = values.get("extensions.refstorage", "files")
+    if object_format not in {"sha1", "sha256"}:
+        raise AuditError(f"unsupported Git object format: {object_format}")
+    if ref_storage not in {"files", "reftable"}:
+        raise AuditError(f"unsupported Git ref storage: {ref_storage}")
+    return values
+
+
 def _read_head(worktree_git_dir: Path, common_git_dir: Path) -> str:
     head_path = worktree_git_dir / "HEAD"
-    try:
-        head = head_path.read_text(encoding="ascii").strip()
-    except (OSError, UnicodeDecodeError) as exc:
-        raise AuditError(f"cannot read Git HEAD: {exc}") from exc
+    head = read_bounded_metadata(head_path, "Git HEAD", 4096).strip()
     if re.fullmatch(r"[0-9a-fA-F]{40,64}", head):
         return head.lower()
     if not head.startswith("ref: refs/") or ".." in Path(head[5:]).parts:
@@ -118,19 +191,15 @@ def _read_head(worktree_git_dir: Path, common_git_dir: Path) -> str:
     for base in (worktree_git_dir, common_git_dir):
         loose = base / reference
         if loose.is_file() and not loose.is_symlink():
-            try:
-                value = loose.read_text(encoding="ascii").strip()
-            except (OSError, UnicodeDecodeError) as exc:
-                raise AuditError(f"cannot read Git HEAD reference: {exc}") from exc
+            value = read_bounded_metadata(loose, "Git HEAD reference", 4096).strip()
             if re.fullmatch(r"[0-9a-fA-F]{40,64}", value):
                 return value.lower()
             raise AuditError("Git HEAD reference is malformed")
     packed_refs = common_git_dir / "packed-refs"
     if packed_refs.is_file() and not packed_refs.is_symlink():
-        try:
-            lines = packed_refs.read_text(encoding="ascii").splitlines()
-        except (OSError, UnicodeDecodeError) as exc:
-            raise AuditError(f"cannot read packed Git references: {exc}") from exc
+        lines = read_bounded_metadata(
+            packed_refs, "packed Git references", MAX_GIT_METADATA_BYTES
+        ).splitlines()
         for line in lines:
             fields = line.split(" ", 1)
             if len(fields) == 2 and fields[1] == reference and re.fullmatch(
@@ -143,9 +212,10 @@ def _read_head(worktree_git_dir: Path, common_git_dir: Path) -> str:
 class SafeGit:
     """Run read-only Git queries without loading any target-controlled config."""
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, deadline: float | None = None):
         self.root = root
-        directories = _git_directories(root)
+        self.deadline = deadline or (time.monotonic() + AUDIT_TIMEOUT_SECONDS)
+        directories = _git_directories(root, self.deadline)
         self.is_repository = directories is not None
         self.worktree_count = 0
         self._temporary: tempfile.TemporaryDirectory[str] | None = None
@@ -153,12 +223,16 @@ class SafeGit:
         if directories is None:
             return
         self.worktree_git_dir, self.common_git_dir = directories
+        self.repository_format = _read_repository_format(self.common_git_dir)
         worktrees = self.common_git_dir / "worktrees"
-        linked = (
-            sum(1 for item in worktrees.iterdir() if item.is_dir() and not item.is_symlink())
-            if worktrees.is_dir()
-            else 0
-        )
+        linked = 0
+        if worktrees.is_dir():
+            for item in worktrees.iterdir():
+                ensure_before_deadline(self.deadline)
+                if item.is_dir() and not item.is_symlink():
+                    linked += 1
+                if linked > MAX_SCAN_PATHS:
+                    raise AuditError(f"Git worktree count exceeds {MAX_SCAN_PATHS}")
         self.worktree_count = linked + 1
 
     def __enter__(self) -> "SafeGit":
@@ -168,10 +242,27 @@ class SafeGit:
         isolated = Path(self._temporary.name)
         (isolated / "objects").mkdir()
         (isolated / "refs" / "heads").mkdir(parents=True)
-        (isolated / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+        config_lines = ["[core]", "\tbare = false"]
+        repository_version = self.repository_format.get("core.repositoryformatversion")
+        if repository_version is not None:
+            config_lines.append(f"\trepositoryformatversion = {repository_version}")
+        extensions = {
+            key.split(".", 1)[1]: value
+            for key, value in self.repository_format.items()
+            if key.startswith("extensions.")
+        }
+        if extensions:
+            config_lines.append("[extensions]")
+            config_lines.extend(f"\t{key} = {value}" for key, value in sorted(extensions.items()))
+        (isolated / "config").write_text("\n".join(config_lines) + "\n", encoding="utf-8")
         (isolated / "HEAD").write_text(
             f"{_read_head(self.worktree_git_dir, self.common_git_dir)}\n", encoding="ascii"
         )
+        if extensions.get("refstorage") == "reftable":
+            reftable = self.common_git_dir / "reftable"
+            if not reftable.is_dir() or reftable.is_symlink():
+                raise AuditError("Git reftable storage is missing or unsafe")
+            (isolated / "reftable").symlink_to(reftable, target_is_directory=True)
         environment = os.environ.copy()
         for key in list(environment):
             if key.startswith("GIT_"):
@@ -199,8 +290,9 @@ class SafeGit:
     def run(self, *args: str) -> str:
         if not self.is_repository or self._environment is None:
             raise AuditError("Git query requested outside an isolated repository context")
+        ensure_before_deadline(self.deadline)
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 [
                     "git",
                     "--no-optional-locks",
@@ -213,21 +305,61 @@ class SafeGit:
                     *args,
                 ],
                 cwd=self.root,
-                text=True,
-                capture_output=True,
-                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 env=self._environment,
-                timeout=GIT_TIMEOUT_SECONDS,
             )
-        except subprocess.TimeoutExpired as exc:
-            raise AuditError(f"Git query timed out after {GIT_TIMEOUT_SECONDS} seconds") from exc
         except OSError as exc:
             raise AuditError(f"Git query could not start: {exc}") from exc
-        if result.returncode != 0:
-            detail = result.stderr.strip().splitlines()
+        assert process.stdout is not None and process.stderr is not None
+        selected = selectors.DefaultSelector()
+        selected.register(process.stdout, selectors.EVENT_READ, ("stdout", MAX_GIT_OUTPUT_BYTES))
+        selected.register(process.stderr, selectors.EVENT_READ, ("stderr", MAX_GIT_ERROR_BYTES))
+        output = {"stdout": bytearray(), "stderr": bytearray()}
+        command_deadline = min(self.deadline, time.monotonic() + GIT_TIMEOUT_SECONDS)
+        try:
+            while selected.get_map():
+                remaining = command_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise AuditError(f"Git query timed out after {GIT_TIMEOUT_SECONDS} seconds")
+                events = selected.select(timeout=remaining)
+                if not events:
+                    raise AuditError(f"Git query timed out after {GIT_TIMEOUT_SECONDS} seconds")
+                for key, _ in events:
+                    name, maximum = key.data
+                    chunk = os.read(key.fileobj.fileno(), 64 * 1024)
+                    if not chunk:
+                        selected.unregister(key.fileobj)
+                        continue
+                    output[name].extend(chunk)
+                    if len(output[name]) > maximum:
+                        raise AuditError(f"Git {name} exceeds {maximum} bytes")
+            remaining = command_deadline - time.monotonic()
+            if remaining <= 0:
+                raise AuditError(f"Git query timed out after {GIT_TIMEOUT_SECONDS} seconds")
+            returncode = process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired as exc:
+            process.kill()
+            process.wait()
+            raise AuditError(f"Git query timed out after {GIT_TIMEOUT_SECONDS} seconds") from exc
+        except AuditError:
+            process.kill()
+            process.wait()
+            raise
+        finally:
+            selected.close()
+            process.stdout.close()
+            process.stderr.close()
+        try:
+            stdout = output["stdout"].decode("utf-8")
+            stderr = output["stderr"].decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise AuditError("Git query returned non-UTF-8 output") from exc
+        if returncode != 0:
+            detail = stderr.strip().splitlines()
             suffix = f": {detail[0]}" if detail else ""
             raise AuditError(f"Git {' '.join(args)} failed{suffix}")
-        return result.stdout
+        return stdout
 
 
 def load_signatures() -> dict[str, Any]:
@@ -237,39 +369,94 @@ def load_signatures() -> dict[str, Any]:
     return data
 
 
-def tracked_files(root: Path, git: SafeGit) -> list[Path]:
+def tracked_files(root: Path, git: SafeGit, deadline: float) -> list[Path]:
     if git.is_repository:
         output = git.run("ls-files", "-z", "--cached", "--others", "--exclude-standard")
-        return sorted(
-            (root / item for item in output.split("\0") if item),
-            key=lambda item: item.relative_to(root).as_posix(),
-        )
+        items = [item for item in output.split("\0") if item]
+        if len(items) > MAX_SCAN_PATHS:
+            raise AuditError(f"scan candidate count exceeds {MAX_SCAN_PATHS}")
+        if sum(len(item.encode("utf-8")) for item in items) > MAX_SCAN_PATH_BYTES:
+            raise AuditError(f"scan candidate paths exceed {MAX_SCAN_PATH_BYTES} bytes")
+        for item in items:
+            candidate = Path(item)
+            if candidate.is_absolute() or ".." in candidate.parts:
+                raise AuditError(f"Git returned unsafe path: {item}")
+        return sorted((root / item for item in items), key=lambda item: item.relative_to(root).as_posix())
     candidates: list[Path] = []
+    path_bytes = 0
     for directory, names, files in os.walk(root, followlinks=False):
+        ensure_before_deadline(deadline)
         names[:] = sorted(name for name in names if name not in SKIPPED_PARTS)
         base = Path(directory)
-        candidates.extend(base / name for name in sorted(files))
-        candidates.extend(base / name for name in names if (base / name).is_symlink())
+        additions = [base / name for name in sorted(files)]
+        additions.extend(base / name for name in names if (base / name).is_symlink())
+        for candidate in additions:
+            path_bytes += len(candidate.relative_to(root).as_posix().encode("utf-8"))
+            if len(candidates) >= MAX_SCAN_PATHS:
+                raise AuditError(f"scan candidate count exceeds {MAX_SCAN_PATHS}")
+            if path_bytes > MAX_SCAN_PATH_BYTES:
+                raise AuditError(f"scan candidate paths exceed {MAX_SCAN_PATH_BYTES} bytes")
+            candidates.append(candidate)
     return sorted(candidates, key=lambda item: item.relative_to(root).as_posix())
 
 
-def scannable(path: Path, root: Path) -> bool:
+def content_excluded(path: Path, root: Path) -> bool:
     relative = path.relative_to(root)
     if any(part in SKIPPED_PARTS for part in relative.parts):
-        return False
+        return True
     if path.name in SKIPPED_NAMES or path.name.startswith(".env."):
-        return False
+        return True
     if path.suffix.lower() in SKIPPED_SUFFIXES:
-        return False
+        return True
+    return False
+
+
+def read_candidate_text(root: Path, path: Path) -> tuple[str | None, str | None]:
+    relative = path.relative_to(root)
+    if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+        raise AuditError(f"unsafe scan candidate: {relative.as_posix()}")
+    if content_excluded(path, root):
+        return None, None
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    if not no_follow and first_symlink(root, path) is not None:
+        return None, "symlink"
+    descriptors: list[int] = []
     try:
-        metadata = path.lstat()
+        current = os.open(root, directory_flags)
+        descriptors.append(current)
+        for part in relative.parts[:-1]:
+            current = os.open(part, directory_flags | no_follow, dir_fd=current)
+            descriptors.append(current)
+        descriptor = os.open(relative.parts[-1], os.O_RDONLY | no_follow, dir_fd=current)
+        descriptors.append(descriptor)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            return None, "non-regular"
+        if metadata.st_size > MAX_FILE_SIZE:
+            return None, "oversize"
+        data = bytearray()
+        while len(data) <= MAX_FILE_SIZE:
+            chunk = os.read(descriptor, min(64 * 1024, MAX_FILE_SIZE + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+        if len(data) > MAX_FILE_SIZE:
+            return None, "oversize"
+        try:
+            return bytes(data).decode("utf-8"), None
+        except UnicodeDecodeError:
+            return None, "non-utf8"
     except OSError as exc:
-        raise AuditError(f"cannot inspect {relative.as_posix()}: {exc}") from exc
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        return False
-    if metadata.st_size > MAX_FILE_SIZE:
-        raise AuditError(f"scannable file exceeds {MAX_FILE_SIZE} bytes: {relative.as_posix()}")
-    return True
+        if exc.errno == errno.ELOOP or first_symlink(root, path) is not None:
+            return None, "symlink"
+        return None, f"unreadable:{exc.errno}"
+    finally:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 def add_finding(
@@ -377,18 +564,25 @@ def enabled_plugins_from_settings(root: Path, path: Path) -> dict[str, bool]:
     return selectors
 
 
-def ignored_memory_integrations(root: Path, runtime_root: str) -> list[str]:
+def ignored_memory_integrations(root: Path, runtime_root: str, deadline: float) -> list[str]:
     integrations: list[str] = []
+    inspected = 0
+    path_bytes = 0
     for relative_root in (Path(runtime_root), Path("scripts")):
         start = root / relative_root
         if not start.is_dir() or start.is_symlink():
             continue
         for directory, names, files in os.walk(start, followlinks=False):
+            ensure_before_deadline(deadline)
             names[:] = sorted(name for name in names if name not in SKIPPED_PARTS)
             base = Path(directory)
             for name in names:
                 candidate = base / name
                 relative = candidate.relative_to(root)
+                inspected += 1
+                path_bytes += len(relative.as_posix().encode("utf-8"))
+                if inspected > MAX_SCAN_PATHS or path_bytes > MAX_SCAN_PATH_BYTES:
+                    raise AuditError("memory integration scan exceeds repository bounds")
                 if candidate.is_symlink() and any(
                     "memory" in part.lower() for part in relative.parts
                 ):
@@ -396,17 +590,41 @@ def ignored_memory_integrations(root: Path, runtime_root: str) -> list[str]:
             for name in sorted(files):
                 candidate = base / name
                 relative = candidate.relative_to(root)
+                inspected += 1
+                path_bytes += len(relative.as_posix().encode("utf-8"))
+                if inspected > MAX_SCAN_PATHS or path_bytes > MAX_SCAN_PATH_BYTES:
+                    raise AuditError("memory integration scan exceeds repository bounds")
                 if "memory" in name.lower() and "link" in name.lower():
                     integrations.append(relative.as_posix())
     return integrations
 
 
+def content_pattern_matches(
+    pattern_id: str, pattern: re.Pattern[str], path: Path, line: str
+) -> bool:
+    match = pattern.search(line)
+    if match is None:
+        return False
+    if pattern_id != "claude-cli" or path.suffix.lower() not in PROSE_SUFFIXES:
+        return True
+    stripped = line.strip()
+    match = pattern.search(stripped)
+    if match is None:
+        return False
+    if match.start() == 0:
+        return any(character.isspace() for character in stripped)
+    return stripped[match.start() - 1] in ";&|"
+
+
 def audit(root: Path, signatures: dict[str, Any]) -> dict[str, Any]:
-    with SafeGit(root) as git:
-        return audit_in_context(root, signatures, git)
+    deadline = time.monotonic() + AUDIT_TIMEOUT_SECONDS
+    with SafeGit(root, deadline) as git:
+        return audit_in_context(root, signatures, git, deadline)
 
 
-def audit_in_context(root: Path, signatures: dict[str, Any], git: SafeGit) -> dict[str, Any]:
+def audit_in_context(
+    root: Path, signatures: dict[str, Any], git: SafeGit, deadline: float
+) -> dict[str, Any]:
     paths = signatures["paths"]
     is_git = git.is_repository
     dirty_count = 0
@@ -518,14 +736,18 @@ def audit_in_context(root: Path, signatures: dict[str, Any], git: SafeGit) -> di
 
     settings_evidence: list[str] = []
     enabled_state: dict[str, bool] = {}
+    configured_selectors: set[str] = set()
     for settings_key, finding_id, label in (
         ("settings", "runtime-settings-symlink", "Runtime settings"),
         ("settings_local", "runtime-local-settings-symlink", "Local runtime settings"),
     ):
         settings_path = root / paths[settings_key]
         if safe_explicit_file(root, settings_path, findings, finding_id, label):
-            enabled_state.update(enabled_plugins_from_settings(root, settings_path))
+            configured = enabled_plugins_from_settings(root, settings_path)
+            configured_selectors.update(configured)
+            enabled_state.update(configured)
             settings_evidence.append(paths[settings_key])
+    inventory["configuredPlugins"] = sorted(configured_selectors)
     inventory["enabledPlugins"] = sorted(
         selector for selector, enabled in enabled_state.items() if enabled
     )
@@ -540,7 +762,7 @@ def audit_in_context(root: Path, signatures: dict[str, Any], git: SafeGit) -> di
             settings_evidence,
         )
 
-    candidates = tracked_files(root, git)
+    candidates = tracked_files(root, git, deadline)
     memory_integrations: list[str] = []
     for path in candidates:
         relative = path.relative_to(root)
@@ -550,7 +772,9 @@ def audit_in_context(root: Path, signatures: dict[str, Any], git: SafeGit) -> di
         is_link_helper = "memory" in path.name.lower() and "link" in path.name.lower()
         if is_link_helper or (path.is_symlink() and has_memory_name):
             memory_integrations.append(relative.as_posix())
-    memory_integrations.extend(ignored_memory_integrations(root, paths["runtime_root"]))
+    memory_integrations.extend(
+        ignored_memory_integrations(root, paths["runtime_root"], deadline)
+    )
     memory_integrations = sorted(set(memory_integrations))[:MAX_EVIDENCE_PER_PATTERN]
     inventory["memoryIntegrationPaths"] = memory_integrations
     if memory_integrations:
@@ -574,21 +798,41 @@ def audit_in_context(root: Path, signatures: dict[str, Any], git: SafeGit) -> di
     for plugin_name, evidence in plugin_evidence.items():
         if any(
             selector == plugin_name or selector.startswith(f"{plugin_name}@")
-            for selector in inventory["enabledPlugins"]
+            for selector in inventory["configuredPlugins"]
         ):
             evidence.extend(settings_evidence)
-    for path in candidates:
-        if not scannable(path, root):
+    unscanned_count = 0
+    unscanned_evidence: list[str] = []
+    scanned_content_bytes = 0
+    for candidate_index, path in enumerate(candidates):
+        ensure_before_deadline(deadline)
+        text, reason = read_candidate_text(root, path)
+        if reason is not None:
+            unscanned_count += 1
+            if len(unscanned_evidence) < MAX_EVIDENCE_PER_PATTERN:
+                unscanned_evidence.append(f"{path.relative_to(root).as_posix()}:{reason}")
+        if text is None:
             continue
+        content_bytes = len(text.encode("utf-8"))
+        if scanned_content_bytes + content_bytes > MAX_SCANNED_CONTENT_BYTES:
+            remaining = len(candidates) - candidate_index
+            unscanned_count += remaining
+            for skipped in candidates[candidate_index:]:
+                if len(unscanned_evidence) >= MAX_EVIDENCE_PER_PATTERN:
+                    break
+                unscanned_evidence.append(
+                    f"{skipped.relative_to(root).as_posix()}:scan-budget"
+                )
+            break
+        scanned_content_bytes += content_bytes
         relative = path.relative_to(root).as_posix()
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            raise AuditError(f"cannot scan {relative} as UTF-8: {exc}") from exc
         for line_number, line in enumerate(text.splitlines(), 1):
             for pattern_id, _, pattern in compiled:
                 evidence = pattern_evidence[pattern_id]
-                if len(evidence) < MAX_EVIDENCE_PER_PATTERN and pattern.search(line):
+                if (
+                    len(evidence) < MAX_EVIDENCE_PER_PATTERN
+                    and content_pattern_matches(pattern_id, pattern, path, line)
+                ):
                     evidence.append(f"{relative}:{line_number}")
             for plugin_name, evidence in plugin_evidence.items():
                 if (
@@ -596,6 +840,20 @@ def audit_in_context(root: Path, signatures: dict[str, Any], git: SafeGit) -> di
                     and re.search(rf"(?<![A-Za-z0-9_-]){re.escape(plugin_name)}(?![A-Za-z0-9_-])", line)
                 ):
                     evidence.append(f"{relative}:{line_number}")
+
+    inventory["unscannedFileCount"] = unscanned_count
+    inventory["scannedContentBytes"] = scanned_content_bytes
+    if unscanned_count:
+        add_finding(
+            findings,
+            "scan-incomplete",
+            "warning",
+            "scope",
+            f"Content scanning skipped {unscanned_count} bounded, binary, unreadable, or linked candidate file(s).",
+            "Review the listed paths manually when complete content coverage is required.",
+            unscanned_evidence,
+            "approval-required",
+        )
 
     for pattern_id, evidence in pattern_evidence.items():
         if evidence:

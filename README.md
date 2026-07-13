@@ -13,14 +13,15 @@ exist. See the [parity ledger](docs/parity.md) for the detailed status.
 ## Tracked upstream
 
 - Repository: `gering/claude-plugins`
-- Reviewed commit: `87917b5f3e6de28d2b550ee9e6ce0f7c62a441bd`
-- Review date: 2026-07-12
+- Reviewed commit: `390c1caa2ddd1230c4dc5cee7be40f30fae1d3f2`
+- Review date: 2026-07-13
 - Upstream versions: knowledge-system 1.8.2, work-system 1.6.0,
-  pr-flow 1.2.2, swarm 0.3.0
+  pr-flow 1.2.3, swarm 0.3.0
 - Uncommitted upstream changes were detected and explicitly excluded.
 - The merged swarm 0.3.0 upstream was reviewed without importing dirty files.
   Later knowledge-only reindex/link fixes through `87917b5` were also reviewed;
-  no runtime implementation was imported.
+  PR #27's pr-flow review-table alignment through `390c1ca` was reviewed next.
+  No runtime implementation was imported.
   Use `python3 scripts/check-upstream.py` to compare the recorded state with
   the locally cached upstream `origin/main` ref.
 
