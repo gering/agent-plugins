@@ -37,7 +37,7 @@ Allowed states are `missing`, `planned`, `partial`, `parity`, and
 
 | Plugin | Claude source | Codex status | Grok status | Last sync | Differences | Evidence |
 |---|---|---|---|---|---|---|
-| project-adoption | New companion capability; no single Claude plugin source | partial | planned | 2026-07-13 / `59996c259786eb2d4d6b9805925439745eb5c6e3` | Codex ships a POSIX-only, read-only native audit; unbound `--separate-git-dir`, Windows support, Grok adapter, and approved apply mode remain planned. | Complete deterministic test suite; native manifest validation; isolated Codex install; fresh-session skill discovery and non-mutating audit of `muellmann-app.de` with explicit scanned, unscanned, policy-excluded, Git-ignored, and pruned-directory coverage. |
+| project-adoption | New companion capability; no single Claude plugin source | partial | partial | 2026-07-13 / `59996c259786eb2d4d6b9805925439745eb5c6e3` | Codex and Grok ship thin native adapters over the same POSIX-only, read-only shared auditor (audit_project.py). Unbound `--separate-git-dir`, Windows support, and approved apply mode remain planned. Grok uses explicit .grok-plugin + ./grok/skills/ convention. | Complete deterministic test suite; native grok plugin validate; local marketplace registration + direct install; grok inspect skill discovery (plugin: project-adoption, grok/skills path); JSON and text auditor output; unchanged Codex install/list behavior; non-mutating dogfood of installed Grok adapter against muellmann-app.de (identical pre/post Git HEAD + porcelain + worktree hashes); fail-closed and read-only guarantees. |
 | knowledge-system | 1.8.2 at `59996c259786eb2d4d6b9805925439745eb5c6e3` | planned | planned | 2026-07-13 / `59996c259786eb2d4d6b9805925439745eb5c6e3` | Native memories are local preference stores; versioned project knowledge remains canonical. | Both manifests validated; no skills imported. |
 | work-system | 1.6.0 at `59996c259786eb2d4d6b9805925439745eb5c6e3` | planned | planned | 2026-07-13 / `59996c259786eb2d4d6b9805925439745eb5c6e3` | Launch/resume will use native Codex and Grok/herdr commands. | Both manifests validated; no workflow tests. |
 | pr-flow | 1.2.3 at `59996c259786eb2d4d6b9805925439745eb5c6e3` | planned | planned | 2026-07-13 / `59996c259786eb2d4d6b9805925439745eb5c6e3` | Local review is separated from optional GitHub `@claude review`; upstream's review-table alignment remains unported. | Both manifests validated; PR #27 format changes reviewed; no workflow tests. |
@@ -45,15 +45,13 @@ Allowed states are `missing`, `planned`, `partial`, `parity`, and
 
 ## Baseline limitations
 
-- Only Codex `project-adoption` is currently advertised as installable; all
-  other Codex plugins and every Grok plugin remain unavailable.
-- Codex `project-adoption` currently requires POSIX descriptor-relative
+- `project-adoption` is advertised and installable for both Codex (via .agents) and
+  Grok (via .grok-plugin marketplace + native `grok plugin install` / marketplace).
+- `project-adoption` (Codex + Grok) currently requires POSIX descriptor-relative
   no-follow file I/O and fails closed on unsupported hosts, including Windows.
 - Git metadata must be rooted normally or bind back through linked-worktree or
   submodule metadata; unbound `--separate-git-dir` layouts are unsupported.
-- Fresh-session discovery is proven for Codex `project-adoption`; other Codex
-  plugins and every Grok workflow remain untested and unavailable.
-- Grok native plugin commands and local marketplace registration were verified
-  with Grok Build 0.2.93, but a real installed adapter session is still pending.
-- Codex manifests and isolated local marketplace registration were verified
-  with the current plugin validator and Codex CLI 0.144.1.
+- Fresh-session skill discovery, native manifest validation, marketplace
+  registration/install, JSON+text auditor, and read-only dogfood proven for
+  the installed Grok adapter; Codex behavior remains unchanged.
+- Grok native commands verified with Grok Build 0.2.99; Codex with 0.144.1.

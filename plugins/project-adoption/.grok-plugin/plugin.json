@@ -7,5 +7,6 @@
   },
   "repository": "https://github.com/gering/agent-plugins",
   "license": "MIT",
-  "keywords": ["adoption", "migration", "codex", "grok"]
+  "keywords": ["adoption", "migration", "codex", "grok"],
+  "skills": "./grok/skills/"
 }

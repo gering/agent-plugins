@@ -252,7 +252,7 @@ must remain intact and no production deployment may be triggered by tests.
 ### Phase 2: Adoption and knowledge
 
 - [x] Implement Codex `adopt-claude-project`
-- [ ] Implement Grok adoption adapter or integrate the existing global Grok skill
+- [x] Implement Grok adoption adapter (thin native using .grok-plugin + grok/skills/ + shared auditor; no Claude literals)
 - [ ] Port knowledge query/curate/reindex behavior
 - [x] Validate against `muellmann-app.de` in read-only mode
 

@@ -6,9 +6,9 @@ remains the Claude Code distribution and current feature reference. The two
 repositories are independently installable and released separately.
 
 This repository is in early implementation. The read-only
-`project-adoption` workflow is installable for Codex; the remaining Codex and
-Grok workflows stay unavailable until their skills and behavioral checks
-exist. See the [parity ledger](docs/parity.md) for the detailed status.
+`project-adoption` workflow is installable for both Codex and Grok via their
+native marketplaces and manifests; the remaining workflows stay unavailable
+until their skills and behavioral checks exist. See the [parity ledger](docs/parity.md) for the detailed status.
 
 ## Tracked upstream
 
@@ -30,7 +30,7 @@ exist. See the [parity ledger](docs/parity.md) for the detailed status.
 
 | Plugin | Codex | Grok |
 |---|---|---|
-| project-adoption | partial | planned |
+| project-adoption | partial | partial |
 | knowledge-system | planned | planned |
 | work-system | planned | planned |
 | pr-flow | planned | planned |
@@ -68,10 +68,13 @@ explicit unsupported-layout error.
 
 ## Grok marketplace
 
-Grok Build 0.2.93 provides native plugin and marketplace commands. This
+Grok Build provides native plugin and marketplace commands. This
 repository therefore uses `.grok-plugin/marketplace.json` and per-plugin
 `.grok-plugin/plugin.json` manifests instead of relying on Grok's Claude
 compatibility discovery.
+
+`project-adoption` is the first installable Grok plugin (thin native adapter
+delegating to shared read-only auditor).
 
 The repeatable local flow is:
 
@@ -79,11 +82,11 @@ The repeatable local flow is:
 grok plugin marketplace add /path/to/agent-plugins
 grok plugin marketplace list
 grok plugin validate plugins/project-adoption
+grok plugin install project-adoption   # or from marketplace source
 ```
 
-The Phase 1 Grok marketplace intentionally contains no installable entries.
-When an adapter is ready, install it from the registered marketplace or test a
-local plugin directly with `grok plugin install ./plugins/<plugin>`.
+After install, start a fresh session (or use `grok inspect`) to discover the
+skill. Invoke with `/adopt-claude-project <target>`.
 
 See [Grok installation](docs/grok-installation.md) for validation and update
 details.

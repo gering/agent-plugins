@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PLUGINS = ("project-adoption", "knowledge-system", "work-system", "pr-flow")
 UPSTREAM_PLUGINS = (*PLUGINS, "swarm")
 AVAILABLE_CODEX_PLUGINS = {"project-adoption"}
+AVAILABLE_GROK_PLUGINS = {"project-adoption"}
 ALLOWED_AUTHENTICATION = {"ON_INSTALL", "ON_USE"}
 ALLOWED_MANIFEST_KEYS = {
     "id",
@@ -42,6 +43,7 @@ ALLOWED_GROK_MANIFEST_KEYS = {
     "license",
     "keywords",
     "logo",
+    "skills",
 }
 ALLOWED_INTERFACE_KEYS = {
     "displayName",
@@ -196,8 +198,8 @@ def validate_manifest(plugin: str, runtime: str) -> dict[str, Any] | None:
     data = load_json(relative)
     if not isinstance(data, dict):
         return None
+    plugin_root = ROOT / "plugins" / plugin
     if runtime == "codex":
-        plugin_root = ROOT / "plugins" / plugin
         for key in sorted(set(data) - ALLOWED_MANIFEST_KEYS):
             fail(f"{relative}: unsupported Codex manifest field {key!r}")
     else:
@@ -291,6 +293,15 @@ def validate_manifest(plugin: str, runtime: str) -> dict[str, Any] | None:
                 for label, pattern in FORBIDDEN_REFERENCE_PATTERNS:
                     if pattern.search(value):
                         fail(f"{relative}: inline MCP config contains forbidden {label}")
+    if runtime == "grok":
+        skills = data.get("skills")
+        if skills is not None:
+            if skills != "./grok/skills/":
+                fail(f"{relative}: skills must equal \"./grok/skills/\" if declared")
+            else:
+                target = plugin_root / "grok/skills"
+                if not target.is_dir():
+                    fail(f"{relative}: declared skills directory does not exist")
     return data
 
 
@@ -367,8 +378,30 @@ def validate_grok_marketplace() -> None:
     if not isinstance(owner, dict) or not isinstance(owner.get("name"), str):
         fail(f"{relative}: owner.name is required")
     entries = data.get("plugins")
-    if entries != []:
-        fail(f"{relative}: Phase 1 must not advertise unfinished Grok plugins")
+    if not isinstance(entries, list):
+        fail(f"{relative}: plugins must be an array")
+        return
+    names = [e.get("name") for e in entries if isinstance(e, dict)]
+    if len(names) != len(set(names)):
+        fail(f"{relative}: duplicate plugin names are not allowed")
+    expected = set(AVAILABLE_GROK_PLUGINS)
+    if entries and set(names) != expected:
+        fail(f"{relative}: Grok plugins must match {sorted(expected)} when advertised (only after full validation)")
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if name not in AVAILABLE_GROK_PLUGINS:
+            continue
+        source = entry.get("source")
+        expected_src = {"source": "local", "path": f"./plugins/{name}"}
+        if source != expected_src:
+            fail(f"{relative}: {name} must use local source {expected_src}")
+        if not (ROOT / f"plugins/{name}" / ".grok-plugin/plugin.json").is_file():
+            fail(f"{relative}: {name} source does not contain a Grok manifest")
+        # description optional but recommended
+        if "description" in entry and not isinstance(entry.get("description"), str):
+            fail(f"{relative}: {name} description must be string if present")
 
 
 def validate_upstream() -> dict[str, Any] | None:
@@ -497,6 +530,7 @@ def validate_project_adoption_slice() -> None:
         ADOPTION_SIGNATURES,
         "plugins/project-adoption/skills/adopt-claude-project/SKILL.md",
         "plugins/project-adoption/skills/adopt-claude-project/agents/openai.yaml",
+        "plugins/project-adoption/grok/skills/adopt-claude-project/SKILL.md",
         "tests/test_project_adoption.py",
     )
     for relative in required:
@@ -558,6 +592,32 @@ def validate_project_adoption_slice() -> None:
             fail(f"{agent_relative}: default_prompt must mention $adopt-claude-project")
         if "TODO" in agent:
             fail(f"{agent_relative}: unresolved TODO marker")
+
+    # Grok native adapter skill (thin prompt + invocation; delegates to shared auditor)
+    grok_skill_relative = "plugins/project-adoption/grok/skills/adopt-claude-project/SKILL.md"
+    grok_skill = load_text(grok_skill_relative)
+    if grok_skill is not None:
+        if not grok_skill.startswith("---\n") or "\n---\n" not in grok_skill[4:]:
+            fail(f"{grok_skill_relative}: missing complete YAML frontmatter")
+        else:
+            frontmatter, body = grok_skill[4:].split("\n---\n", 1)
+            metadata: dict[str, str] = {}
+            for line in frontmatter.splitlines():
+                key, separator, value = line.partition(":")
+                if not separator or not key or key in metadata or not value.strip():
+                    fail(f"{grok_skill_relative}: malformed frontmatter")
+                    continue
+                metadata[key] = value.strip()
+            if set(metadata) != {"name", "description"}:
+                fail(f"{grok_skill_relative}: frontmatter must contain only name and description")
+            if metadata.get("name") != "adopt-claude-project":
+                fail(f"{grok_skill_relative}: skill name must be adopt-claude-project")
+            if not body.strip():
+                fail(f"{grok_skill_relative}: skill instructions must not be empty")
+            if "TODO" in grok_skill:
+                fail(f"{grok_skill_relative}: unresolved TODO marker")
+            if "Grok" not in grok_skill and "grok" not in grok_skill:
+                fail(f"{grok_skill_relative}: Grok adapter skill should reference Grok runtime")
 
 
 def validate_adapter_boundaries() -> None:
