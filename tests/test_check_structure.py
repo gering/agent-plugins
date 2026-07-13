@@ -93,17 +93,27 @@ class StructureCheckTests(unittest.TestCase):
         self.assertIn("project-adoption must use installation policy AVAILABLE", result.stderr)
 
     def test_available_project_adoption_requires_runtime_parity_status(self) -> None:
+        # NOTE: This test deliberately mutates the parity/README table text
+        # to simulate a state where project-adoption is AVAILABLE but the
+        # parity status is not yet "partial"/"parity". The strings are
+        # intentionally tied to the current table content (see docs/parity.md
+        # and README). If the table format or wording changes, update both
+        # the mutation and the expected error message.
         parity_path = self.root / "docs/parity.md"
-        parity = parity_path.read_text(encoding="utf-8").replace(
+        original_parity = parity_path.read_text(encoding="utf-8")
+        parity = original_parity.replace(
             "| project-adoption | New companion capability; no single Claude plugin source | partial | partial |",
             "| project-adoption | New companion capability; no single Claude plugin source | planned | partial |",
         )
+        assert parity != original_parity, "parity replace did not change the text"
         parity_path.write_text(parity, encoding="utf-8")
         readme_path = self.root / "README.md"
-        readme = readme_path.read_text(encoding="utf-8").replace(
+        original_readme = readme_path.read_text(encoding="utf-8")
+        readme = original_readme.replace(
             "| project-adoption | partial | partial |",
             "| project-adoption | planned | partial |",
         )
+        assert readme != original_readme, "readme replace did not change the text"
         readme_path.write_text(readme, encoding="utf-8")
         result = self.run_check()
         self.assertNotEqual(result.returncode, 0)

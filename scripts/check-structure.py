@@ -295,13 +295,15 @@ def validate_manifest(plugin: str, runtime: str) -> dict[str, Any] | None:
                         fail(f"{relative}: inline MCP config contains forbidden {label}")
     if runtime == "grok":
         skills = data.get("skills")
+        if plugin in AVAILABLE_GROK_PLUGINS:
+            if skills != "./grok/skills/":
+                fail(f"{relative}: skills must equal \"./grok/skills/\" for available Grok plugins")
         if skills is not None:
             if skills != "./grok/skills/":
                 fail(f"{relative}: skills must equal \"./grok/skills/\" if declared")
-            else:
-                target = plugin_root / "grok/skills"
-                if not target.is_dir():
-                    fail(f"{relative}: declared skills directory does not exist")
+            target = plugin_root / "grok/skills"
+            if not target.is_dir():
+                fail(f"{relative}: declared skills directory does not exist")
     return data
 
 
@@ -375,17 +377,22 @@ def validate_grok_marketplace() -> None:
     if not isinstance(data.get("description"), str) or not data["description"].strip():
         fail(f"{relative}: description is required")
     owner = data.get("owner")
-    if not isinstance(owner, dict) or not isinstance(owner.get("name"), str):
-        fail(f"{relative}: owner.name is required")
+    if not isinstance(owner, dict) or not isinstance(owner.get("name"), str) or not owner.get("name", "").strip():
+        fail(f"{relative}: owner.name is required and must be non-empty")
     entries = data.get("plugins")
     if not isinstance(entries, list):
         fail(f"{relative}: plugins must be an array")
         return
+    if any(not isinstance(e, dict) for e in entries):
+        fail(f"{relative}: every plugin entry must be an object")
+        return
     names = [e.get("name") for e in entries if isinstance(e, dict)]
+    if any(not isinstance(n, str) or not n.strip() for n in names):
+        fail(f"{relative}: every plugin name must be a non-empty string")
     if len(names) != len(set(names)):
         fail(f"{relative}: duplicate plugin names are not allowed")
     expected = set(AVAILABLE_GROK_PLUGINS)
-    if entries and set(names) != expected:
+    if set(names) != expected:
         fail(f"{relative}: Grok plugins must match {sorted(expected)} when advertised (only after full validation)")
     for entry in entries:
         if not isinstance(entry, dict):
@@ -526,6 +533,31 @@ def validate_adoption_signatures() -> None:
                 fail(f"{ADOPTION_SIGNATURES}: invalid agent-specific regex")
 
 
+def _validate_frontmatter(text: str | None, relative: str, expected_name: str) -> None:
+    if text is None:
+        return
+    if not text.startswith("---\n") or "\n---\n" not in text[4:]:
+        fail(f"{relative}: missing complete YAML frontmatter")
+        return
+    frontmatter, body = text[4:].split("\n---\n", 1)
+    metadata: dict[str, str] = {}
+    for line in frontmatter.splitlines():
+        key, separator, value = line.partition(":")
+        key = key.strip()
+        if not separator or not key or key in metadata or not value.strip():
+            fail(f"{relative}: malformed frontmatter")
+            continue
+        metadata[key] = value.strip()
+    if set(metadata) != {"name", "description"}:
+        fail(f"{relative}: frontmatter must contain only name and description")
+    if metadata.get("name") != expected_name:
+        fail(f"{relative}: skill name must be {expected_name}")
+    if not body.strip():
+        fail(f"{relative}: skill instructions must not be empty")
+    if "TODO" in text:
+        fail(f"{relative}: unresolved TODO marker")
+
+
 def validate_project_adoption_slice() -> None:
     required = (
         "plugins/project-adoption/shared/audit_project.py",
@@ -541,26 +573,7 @@ def validate_project_adoption_slice() -> None:
 
     skill_relative = "plugins/project-adoption/skills/adopt-claude-project/SKILL.md"
     skill = load_text(skill_relative)
-    if skill is not None:
-        if not skill.startswith("---\n") or "\n---\n" not in skill[4:]:
-            fail(f"{skill_relative}: missing complete YAML frontmatter")
-        else:
-            frontmatter, body = skill[4:].split("\n---\n", 1)
-            metadata: dict[str, str] = {}
-            for line in frontmatter.splitlines():
-                key, separator, value = line.partition(":")
-                if not separator or not key or key in metadata or not value.strip():
-                    fail(f"{skill_relative}: malformed frontmatter")
-                    continue
-                metadata[key] = value.strip()
-            if set(metadata) != {"name", "description"}:
-                fail(f"{skill_relative}: frontmatter must contain only name and description")
-            if metadata.get("name") != "adopt-claude-project":
-                fail(f"{skill_relative}: skill name must be adopt-claude-project")
-            if not body.strip():
-                fail(f"{skill_relative}: skill instructions must not be empty")
-            if "TODO" in skill:
-                fail(f"{skill_relative}: unresolved TODO marker")
+    # frontmatter validated via shared helper below
 
     agent_relative = (
         "plugins/project-adoption/skills/adopt-claude-project/agents/openai.yaml"
@@ -595,31 +608,14 @@ def validate_project_adoption_slice() -> None:
         if "TODO" in agent:
             fail(f"{agent_relative}: unresolved TODO marker")
 
+    _validate_frontmatter(skill, skill_relative, "adopt-claude-project")
+
     # Grok native adapter skill (thin prompt + invocation; delegates to shared auditor)
     grok_skill_relative = "plugins/project-adoption/grok/skills/adopt-claude-project/SKILL.md"
     grok_skill = load_text(grok_skill_relative)
-    if grok_skill is not None:
-        if not grok_skill.startswith("---\n") or "\n---\n" not in grok_skill[4:]:
-            fail(f"{grok_skill_relative}: missing complete YAML frontmatter")
-        else:
-            frontmatter, body = grok_skill[4:].split("\n---\n", 1)
-            metadata: dict[str, str] = {}
-            for line in frontmatter.splitlines():
-                key, separator, value = line.partition(":")
-                if not separator or not key or key in metadata or not value.strip():
-                    fail(f"{grok_skill_relative}: malformed frontmatter")
-                    continue
-                metadata[key] = value.strip()
-            if set(metadata) != {"name", "description"}:
-                fail(f"{grok_skill_relative}: frontmatter must contain only name and description")
-            if metadata.get("name") != "adopt-claude-project":
-                fail(f"{grok_skill_relative}: skill name must be adopt-claude-project")
-            if not body.strip():
-                fail(f"{grok_skill_relative}: skill instructions must not be empty")
-            if "TODO" in grok_skill:
-                fail(f"{grok_skill_relative}: unresolved TODO marker")
-            if "Grok" not in grok_skill and "grok" not in grok_skill:
-                fail(f"{grok_skill_relative}: Grok adapter skill should reference Grok runtime")
+    _validate_frontmatter(grok_skill, grok_skill_relative, "adopt-claude-project")
+    if grok_skill is not None and "shared/audit_project.py" not in grok_skill:
+        fail(f"{grok_skill_relative}: Grok adapter skill must reference the shared auditor (shared/audit_project.py)")
 
 
 def validate_adapter_boundaries() -> None:
@@ -720,6 +716,12 @@ def validate_docs(upstream_state: dict[str, Any] | None) -> None:
             "intentional-divergence",
         }:
             fail(f"docs/parity.md: available Codex plugin {plugin} needs runtime evidence")
+        if plugin in AVAILABLE_GROK_PLUGINS and columns[3] not in {
+            "partial",
+            "parity",
+            "intentional-divergence",
+        }:
+            fail(f"docs/parity.md: available Grok plugin {plugin} needs runtime evidence")
     if not upstream_state:
         return
     upstream = upstream_state.get("upstream")
