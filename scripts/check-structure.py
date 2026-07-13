@@ -394,9 +394,11 @@ def validate_grok_marketplace() -> None:
         if name not in AVAILABLE_GROK_PLUGINS:
             continue
         source = entry.get("source")
-        expected_src = {"source": "local", "path": f"./plugins/{name}"}
-        if source != expected_src:
-            fail(f"{relative}: {name} must use local source {expected_src}")
+        # Grok supports flat path string or nested object for local sources
+        expected_flat = f"./plugins/{name}"
+        expected_nested = {"source": "local", "path": expected_flat}
+        if source not in (expected_flat, expected_nested):
+            fail(f"{relative}: {name} must use local source {expected_flat} or {expected_nested}")
         if not (ROOT / f"plugins/{name}" / ".grok-plugin/plugin.json").is_file():
             fail(f"{relative}: {name} source does not contain a Grok manifest")
         # description optional but recommended

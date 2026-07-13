@@ -7,10 +7,7 @@
   "plugins": [
     {
       "name": "project-adoption",
-      "source": {
-        "source": "local",
-        "path": "./plugins/project-adoption"
-      },
+      "source": "./plugins/project-adoption",
       "description": "Run a POSIX-only, read-only audit before adopting Codex or Grok."
     }
   ]

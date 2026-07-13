@@ -95,9 +95,8 @@ class StructureCheckTests(unittest.TestCase):
     def test_available_project_adoption_requires_runtime_parity_status(self) -> None:
         parity_path = self.root / "docs/parity.md"
         parity = parity_path.read_text(encoding="utf-8").replace(
-            "| partial | partial |",
-            "| planned | partial |",
-            1,  # target the project-adoption row's Codex status column
+            "| project-adoption | New companion capability; no single Claude plugin source | partial | partial |",
+            "| project-adoption | New companion capability; no single Claude plugin source | planned | partial |",
         )
         parity_path.write_text(parity, encoding="utf-8")
         readme_path = self.root / "README.md"
