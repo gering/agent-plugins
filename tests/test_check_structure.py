@@ -215,13 +215,15 @@ class StructureCheckTests(unittest.TestCase):
 
     def test_stale_parity_last_sync_fails(self) -> None:
         parity_path = self.root / "docs/parity.md"
-        parity = parity_path.read_text(encoding="utf-8")
-        parity = parity.replace(
-            "2026-07-12 / `87917b5f3e6de28d2b550ee9e6ce0f7c62a441bd` | "
+        original = parity_path.read_text(encoding="utf-8")
+        upstream = self.read_json(".agents/upstream/claude-plugins.json")["upstream"]
+        parity = original.replace(
+            f"{upstream['last_reviewed_date']} / `{upstream['last_reviewed_commit']}` | "
             "Native memories",
             "2026-07-11 / `deadbeefdeadbeefdeadbeefdeadbeefdeadbeef` | "
             "Native memories",
         )
+        self.assertNotEqual(parity, original)
         parity_path.write_text(parity, encoding="utf-8")
         result = self.run_check()
         self.assertNotEqual(result.returncode, 0)
@@ -496,10 +498,20 @@ class StructureCheckTests(unittest.TestCase):
 
     def test_swarm_last_sync_must_match_upstream_state(self) -> None:
         parity_path = self.root / "docs/parity.md"
-        parity = parity_path.read_text(encoding="utf-8").replace(
-            "| swarm | 0.3.0 at `87917b5f3e6de28d2b550ee9e6ce0f7c62a441bd` | missing | missing | 2026-07-12 / `87917b5f3e6de28d2b550ee9e6ce0f7c62a441bd` |",
-            "| swarm | 0.3.0 at `87917b5f3e6de28d2b550ee9e6ce0f7c62a441bd` | missing | missing | 2026-07-11 / `deadbeefdeadbeefdeadbeefdeadbeefdeadbeef` |",
+        original = parity_path.read_text(encoding="utf-8")
+        state = self.read_json(".agents/upstream/claude-plugins.json")
+        upstream = state["upstream"]
+        version = state["plugins"]["swarm"]["source_version"]
+        original_prefix = (
+            f"| swarm | {version} at `{upstream['last_reviewed_commit']}` | missing | missing | "
+            f"{upstream['last_reviewed_date']} / `{upstream['last_reviewed_commit']}` |"
         )
+        stale_prefix = (
+            f"| swarm | {version} at `{upstream['last_reviewed_commit']}` | missing | missing | "
+            "2026-07-11 / `deadbeefdeadbeefdeadbeefdeadbeefdeadbeef` |"
+        )
+        parity = original.replace(original_prefix, stale_prefix)
+        self.assertNotEqual(parity, original)
         parity_path.write_text(parity, encoding="utf-8")
         result = self.run_check()
         self.assertNotEqual(result.returncode, 0)
