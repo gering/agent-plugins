@@ -5,20 +5,24 @@
 remains the Claude Code distribution and current feature reference. The two
 repositories are independently installable and released separately.
 
-This repository is in its foundation phase. Its manifests and marketplace
-skeletons are present, but no workflow plugin is installable yet. Availability
-will be enabled per runtime only after its skills and behavioral checks exist.
-See the [parity ledger](docs/parity.md) for the detailed status.
+This repository is in early implementation. The read-only
+`project-adoption` workflow is installable for Codex; the remaining Codex and
+Grok workflows stay unavailable until their skills and behavioral checks
+exist. See the [parity ledger](docs/parity.md) for the detailed status.
 
 ## Tracked upstream
 
 - Repository: `gering/claude-plugins`
-- Reviewed commit: `ee7bb2db650fb790530c7310be4b317a3e49bb56`
-- Review date: 2026-07-12
+- Reviewed commit: `59996c259786eb2d4d6b9805925439745eb5c6e3`
+- Review date: 2026-07-13
 - Upstream versions: knowledge-system 1.8.2, work-system 1.6.0,
-  pr-flow 1.2.2, swarm 0.3.0
+  pr-flow 1.2.3, swarm 0.3.1
 - Uncommitted upstream changes were detected and explicitly excluded.
 - The merged swarm 0.3.0 upstream was reviewed without importing dirty files.
+  Later knowledge-only reindex/link fixes through `87917b5` were also reviewed;
+  PR #27's pr-flow review-table alignment through `390c1ca` and PR #28's
+  finding-fence hardening through `59996c2` were reviewed next. No runtime
+  implementation was imported.
   Use `python3 scripts/check-upstream.py` to compare the recorded state with
   the locally cached upstream `origin/main` ref.
 
@@ -26,7 +30,7 @@ See the [parity ledger](docs/parity.md) for the detailed status.
 
 | Plugin | Codex | Grok |
 |---|---|---|
-| project-adoption | planned | planned |
+| project-adoption | partial | planned |
 | knowledge-system | planned | planned |
 | work-system | planned | planned |
 | pr-flow | planned | planned |
@@ -40,15 +44,27 @@ Codex uses `.agents/plugins/marketplace.json` and per-plugin
 [OpenAI plugin documentation](https://developers.openai.com/codex/plugins/build)
 and was checked with Codex CLI 0.144.1.
 
-Once the marketplace file is writable and the first plugin becomes available:
+Install the current Codex marketplace and adoption plugin:
 
 ```bash
-codex plugin marketplace add /path/to/agent-plugins
+codex plugin marketplace add gering/agent-plugins --ref main
 codex plugin list
 codex plugin add project-adoption@gering-agent-plugins
 ```
 
-Start a new Codex session after installing or updating a plugin.
+`project-adoption` currently requires a POSIX host. It fails closed on Windows
+or any host without descriptor-relative no-follow file I/O rather than reducing
+its target-containment guarantees.
+
+For local development, substitute the repository checkout path for
+`gering/agent-plugins`. Start a new Codex session after installing or updating,
+then invoke `$adopt-claude-project` with an explicit target repository. The
+initial audit is read-only; it does not rewrite guidance, knowledge, settings,
+or worktrees. Its result reports scanned bytes, exceptional unscanned files,
+intentional policy exclusions, ignored Git paths, and pruned directory paths as
+separate coverage values. Normal repositories, linked worktrees, and bound
+submodules are supported; unbound `--separate-git-dir` layouts fail with an
+explicit unsupported-layout error.
 
 ## Grok marketplace
 

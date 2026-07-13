@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the Phase 1 marketplace, manifests, parity, and provenance."""
+"""Validate plugin structure, runtime boundaries, parity, and provenance."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 ROOT = Path(__file__).resolve().parents[1]
 PLUGINS = ("project-adoption", "knowledge-system", "work-system", "pr-flow")
 UPSTREAM_PLUGINS = (*PLUGINS, "swarm")
+AVAILABLE_CODEX_PLUGINS = {"project-adoption"}
 ALLOWED_AUTHENTICATION = {"ON_INSTALL", "ON_USE"}
 ALLOWED_MANIFEST_KEYS = {
     "id",
@@ -101,8 +102,38 @@ CLAUDE_DOC_COMMAND = re.compile(
     r"(?:\s+(?:--?[A-Za-z0-9]|resume\b|continue\b)|(?=`))",
     re.IGNORECASE,
 )
-BINARY_SUFFIXES = {".gif", ".ico", ".jpeg", ".jpg", ".pdf", ".png", ".webp", ".zip"}
+BINARY_SUFFIXES = {
+    ".gif",
+    ".ico",
+    ".jpeg",
+    ".jpg",
+    ".pdf",
+    ".png",
+    ".pyc",
+    ".webp",
+    ".zip",
+}
 PROSE_SUFFIXES = {".md", ".mdx", ".rst", ".txt"}
+ADOPTION_SIGNATURES = "plugins/project-adoption/shared/signatures.json"
+ADOPTION_PATH_KEYS = {
+    "agent_guidance",
+    "reference_guidance",
+    "runtime_root",
+    "settings",
+    "settings_local",
+    "knowledge",
+    "rules",
+    "legacy_worktrees",
+    "neutral_worktrees",
+    "task_handoff",
+    "tasks",
+}
+ADOPTION_PATTERN_IDS = {
+    "claude-plugin-root",
+    "claude-cli",
+    "claude-workflow-tool",
+    "claude-slash-command-tool",
+}
 EXPECTED_LICENSE_SHA256 = "c920e7838ac1a06728211ce607e0c73f19bb566823eb888b6a6647c80300aaf1"
 
 errors: list[str] = []
@@ -307,10 +338,13 @@ def validate_codex_marketplace() -> None:
         if not isinstance(policy, dict):
             fail(f"{relative}: {plugin} is missing policy")
             continue
-        if policy.get("installation") != "NOT_AVAILABLE":
+        expected_installation = (
+            "AVAILABLE" if plugin in AVAILABLE_CODEX_PLUGINS else "NOT_AVAILABLE"
+        )
+        if policy.get("installation") != expected_installation:
             fail(
-                f"{relative}: unfinished Phase 1 plugin {plugin} must use "
-                "installation policy NOT_AVAILABLE"
+                f"{relative}: {plugin} must use installation policy "
+                f"{expected_installation}"
             )
         if policy.get("authentication") not in ALLOWED_AUTHENTICATION:
             fail(f"{relative}: {plugin} has invalid authentication policy")
@@ -397,6 +431,135 @@ def validate_upstream() -> dict[str, Any] | None:
     return data
 
 
+def validate_adoption_signatures() -> None:
+    data = load_json(ADOPTION_SIGNATURES)
+    if not isinstance(data, dict):
+        return
+    if set(data) != {"paths", "content_patterns", "agent_specific_patterns"}:
+        fail(f"{ADOPTION_SIGNATURES}: unsupported top-level fields")
+    paths = data.get("paths")
+    if not isinstance(paths, dict) or set(paths) != ADOPTION_PATH_KEYS:
+        fail(f"{ADOPTION_SIGNATURES}: paths must match the adoption inventory schema")
+    else:
+        for name, value in paths.items():
+            candidate = Path(value) if isinstance(value, str) else None
+            if (
+                candidate is None
+                or candidate.is_absolute()
+                or ".." in candidate.parts
+                or not candidate.parts
+            ):
+                fail(f"{ADOPTION_SIGNATURES}: invalid relative path for {name}")
+    patterns = data.get("content_patterns")
+    seen_ids: set[str] = set()
+    if not isinstance(patterns, list):
+        fail(f"{ADOPTION_SIGNATURES}: content_patterns must be an array")
+    else:
+        for index, item in enumerate(patterns):
+            if not isinstance(item, dict) or set(item) != {"id", "label", "pattern"}:
+                fail(f"{ADOPTION_SIGNATURES}: invalid content pattern at index {index}")
+                continue
+            pattern_id = item.get("id")
+            label = item.get("label")
+            expression = item.get("pattern")
+            if not isinstance(pattern_id, str) or pattern_id in seen_ids:
+                fail(f"{ADOPTION_SIGNATURES}: duplicate or invalid pattern id")
+            else:
+                seen_ids.add(pattern_id)
+            if not isinstance(label, str) or not label.strip():
+                fail(f"{ADOPTION_SIGNATURES}: pattern labels must be non-empty")
+            if not isinstance(expression, str):
+                fail(f"{ADOPTION_SIGNATURES}: invalid regex for pattern {pattern_id!r}")
+            else:
+                try:
+                    re.compile(expression)
+                except re.error:
+                    fail(f"{ADOPTION_SIGNATURES}: invalid regex for pattern {pattern_id!r}")
+        if seen_ids != ADOPTION_PATTERN_IDS:
+            fail(f"{ADOPTION_SIGNATURES}: content pattern ids must match the approved detector set")
+    agent_patterns = data.get("agent_specific_patterns")
+    if not isinstance(agent_patterns, list) or not agent_patterns:
+        fail(f"{ADOPTION_SIGNATURES}: agent_specific_patterns must be a non-empty array")
+    else:
+        for expression in agent_patterns:
+            if not isinstance(expression, str):
+                fail(f"{ADOPTION_SIGNATURES}: invalid agent-specific regex")
+                continue
+            try:
+                re.compile(expression)
+            except re.error:
+                fail(f"{ADOPTION_SIGNATURES}: invalid agent-specific regex")
+
+
+def validate_project_adoption_slice() -> None:
+    required = (
+        "plugins/project-adoption/shared/audit_project.py",
+        ADOPTION_SIGNATURES,
+        "plugins/project-adoption/skills/adopt-claude-project/SKILL.md",
+        "plugins/project-adoption/skills/adopt-claude-project/agents/openai.yaml",
+        "tests/test_project_adoption.py",
+    )
+    for relative in required:
+        if not (ROOT / relative).is_file():
+            fail(f"project-adoption available slice is missing required file: {relative}")
+
+    skill_relative = "plugins/project-adoption/skills/adopt-claude-project/SKILL.md"
+    skill = load_text(skill_relative)
+    if skill is not None:
+        if not skill.startswith("---\n") or "\n---\n" not in skill[4:]:
+            fail(f"{skill_relative}: missing complete YAML frontmatter")
+        else:
+            frontmatter, body = skill[4:].split("\n---\n", 1)
+            metadata: dict[str, str] = {}
+            for line in frontmatter.splitlines():
+                key, separator, value = line.partition(":")
+                if not separator or not key or key in metadata or not value.strip():
+                    fail(f"{skill_relative}: malformed frontmatter")
+                    continue
+                metadata[key] = value.strip()
+            if set(metadata) != {"name", "description"}:
+                fail(f"{skill_relative}: frontmatter must contain only name and description")
+            if metadata.get("name") != "adopt-claude-project":
+                fail(f"{skill_relative}: skill name must be adopt-claude-project")
+            if not body.strip():
+                fail(f"{skill_relative}: skill instructions must not be empty")
+            if "TODO" in skill:
+                fail(f"{skill_relative}: unresolved TODO marker")
+
+    agent_relative = (
+        "plugins/project-adoption/skills/adopt-claude-project/agents/openai.yaml"
+    )
+    agent = load_text(agent_relative)
+    if agent is not None:
+        lines = agent.splitlines()
+        values: dict[str, str] = {}
+        if not lines or lines[0] != "interface:":
+            fail(f"{agent_relative}: root must be interface")
+        for line in lines[1:]:
+            match = re.fullmatch(r"  ([a-z_]+):\s*(.+)", line)
+            if not match or match.group(1) in values:
+                fail(f"{agent_relative}: malformed interface metadata")
+                continue
+            try:
+                value = json.loads(match.group(2))
+            except json.JSONDecodeError:
+                fail(f"{agent_relative}: interface values must be quoted strings")
+                continue
+            if not isinstance(value, str) or not value.strip():
+                fail(f"{agent_relative}: interface values must be non-empty strings")
+                continue
+            values[match.group(1)] = value
+        if set(values) != {"display_name", "short_description", "default_prompt"}:
+            fail(f"{agent_relative}: interface fields do not match the required schema")
+        short_description = values.get("short_description", "")
+        if short_description and not 25 <= len(short_description) <= 64:
+            fail(f"{agent_relative}: short_description must be 25-64 characters")
+        if "$adopt-claude-project" not in values.get("default_prompt", ""):
+            fail(f"{agent_relative}: default_prompt must mention $adopt-claude-project")
+        if "TODO" in agent:
+            fail(f"{agent_relative}: unresolved TODO marker")
+
+
 def validate_adapter_boundaries() -> None:
     for reviewer_root in ROOT.glob("plugins/*/reviewers"):
         if reviewer_root.exists():
@@ -412,6 +575,9 @@ def validate_adapter_boundaries() -> None:
             continue
         if path.suffix.lower() in BINARY_SUFFIXES:
             continue
+        relative = path.relative_to(ROOT).as_posix()
+        if relative == ADOPTION_SIGNATURES:
+            continue
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
@@ -421,7 +587,12 @@ def validate_adapter_boundaries() -> None:
             ".codex-plugin",
             ".grok-plugin",
         }
-        patterns = FORBIDDEN_REFERENCE_PATTERNS[:2] if is_manifest else FORBIDDEN_REFERENCE_PATTERNS
+        is_ui_metadata = path.name == "openai.yaml" and path.parent.name == "agents"
+        patterns = (
+            FORBIDDEN_REFERENCE_PATTERNS[:2]
+            if is_manifest or is_ui_metadata
+            else FORBIDDEN_REFERENCE_PATTERNS
+        )
         for line_number, line in enumerate(text.splitlines(), start=1):
             for label, pattern in patterns:
                 active_pattern = pattern
@@ -481,6 +652,12 @@ def validate_docs(upstream_state: dict[str, Any] | None) -> None:
             fail(f"docs/parity.md: invalid Grok status for {plugin}")
         if not columns[6].strip():
             fail(f"docs/parity.md: evidence is required for {plugin}")
+        if plugin in AVAILABLE_CODEX_PLUGINS and columns[2] not in {
+            "partial",
+            "parity",
+            "intentional-divergence",
+        }:
+            fail(f"docs/parity.md: available Codex plugin {plugin} needs runtime evidence")
     if not upstream_state:
         return
     upstream = upstream_state.get("upstream")
@@ -553,6 +730,8 @@ def main() -> int:
             fail(f"{plugin}: Codex and Grok manifest versions differ")
     validate_codex_marketplace()
     validate_grok_marketplace()
+    validate_adoption_signatures()
+    validate_project_adoption_slice()
     validate_adapter_boundaries()
 
     if errors:

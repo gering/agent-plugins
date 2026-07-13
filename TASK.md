@@ -251,10 +251,10 @@ must remain intact and no production deployment may be triggered by tests.
 
 ### Phase 2: Adoption and knowledge
 
-- [ ] Implement Codex `adopt-claude-project`
+- [x] Implement Codex `adopt-claude-project`
 - [ ] Implement Grok adoption adapter or integrate the existing global Grok skill
 - [ ] Port knowledge query/curate/reindex behavior
-- [ ] Validate against `muellmann-app.de` in read-only mode
+- [x] Validate against `muellmann-app.de` in read-only mode
 
 ### Phase 3: Work and PR workflows
 

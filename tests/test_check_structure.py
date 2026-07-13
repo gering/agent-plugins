@@ -58,14 +58,62 @@ class StructureCheckTests(unittest.TestCase):
         result = self.run_check()
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_available_project_adoption_skill_requires_valid_frontmatter(self) -> None:
+        skill = self.root / "plugins/project-adoption/skills/adopt-claude-project/SKILL.md"
+        skill.write_text("---\n---\n", encoding="utf-8")
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("frontmatter", result.stderr)
+
+    def test_available_project_adoption_agent_metadata_requires_interface(self) -> None:
+        agent = self.root / (
+            "plugins/project-adoption/skills/adopt-claude-project/agents/openai.yaml"
+        )
+        agent.write_text("interface: {}\n", encoding="utf-8")
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("root must be interface", result.stderr)
+
     def test_available_unfinished_plugin_fails(self) -> None:
         relative = ".agents/plugins/marketplace.json"
         marketplace = self.read_json(relative)
-        marketplace["plugins"][0]["policy"]["installation"] = "AVAILABLE"
+        marketplace["plugins"][1]["policy"]["installation"] = "AVAILABLE"
         self.write_json(relative, marketplace)
         result = self.run_check()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("must use installation policy NOT_AVAILABLE", result.stderr)
+        self.assertIn("knowledge-system must use installation policy NOT_AVAILABLE", result.stderr)
+
+    def test_project_adoption_must_be_available(self) -> None:
+        relative = ".agents/plugins/marketplace.json"
+        marketplace = self.read_json(relative)
+        marketplace["plugins"][0]["policy"]["installation"] = "NOT_AVAILABLE"
+        self.write_json(relative, marketplace)
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("project-adoption must use installation policy AVAILABLE", result.stderr)
+
+    def test_available_project_adoption_requires_runtime_parity_status(self) -> None:
+        parity_path = self.root / "docs/parity.md"
+        parity = parity_path.read_text(encoding="utf-8").replace(
+            "| project-adoption | New companion capability; no single Claude plugin source | partial | planned |",
+            "| project-adoption | New companion capability; no single Claude plugin source | planned | planned |",
+        )
+        parity_path.write_text(parity, encoding="utf-8")
+        readme_path = self.root / "README.md"
+        readme = readme_path.read_text(encoding="utf-8").replace(
+            "| project-adoption | partial | planned |",
+            "| project-adoption | planned | planned |",
+        )
+        readme_path.write_text(readme, encoding="utf-8")
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("needs runtime evidence", result.stderr)
+
+    def test_available_project_adoption_requires_behavior_test(self) -> None:
+        (self.root / "tests/test_project_adoption.py").unlink()
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("available slice is missing required file", result.stderr)
 
     def test_duplicate_marketplace_name_fails(self) -> None:
         relative = ".agents/plugins/marketplace.json"
@@ -167,13 +215,15 @@ class StructureCheckTests(unittest.TestCase):
 
     def test_stale_parity_last_sync_fails(self) -> None:
         parity_path = self.root / "docs/parity.md"
-        parity = parity_path.read_text(encoding="utf-8")
-        parity = parity.replace(
-            "2026-07-12 / `ee7bb2db650fb790530c7310be4b317a3e49bb56` | "
+        original = parity_path.read_text(encoding="utf-8")
+        upstream = self.read_json(".agents/upstream/claude-plugins.json")["upstream"]
+        parity = original.replace(
+            f"{upstream['last_reviewed_date']} / `{upstream['last_reviewed_commit']}` | "
             "Native memories",
             "2026-07-11 / `deadbeefdeadbeefdeadbeefdeadbeefdeadbeef` | "
             "Native memories",
         )
+        self.assertNotEqual(parity, original)
         parity_path.write_text(parity, encoding="utf-8")
         result = self.run_check()
         self.assertNotEqual(result.returncode, 0)
@@ -183,8 +233,8 @@ class StructureCheckTests(unittest.TestCase):
         readme_path = self.root / "README.md"
         readme = readme_path.read_text(encoding="utf-8")
         readme = readme.replace(
-            "| project-adoption | planned | planned |",
             "| project-adoption | partial | planned |",
+            "| project-adoption | parity | planned |",
         )
         readme_path.write_text(readme, encoding="utf-8")
         result = self.run_check()
@@ -345,6 +395,24 @@ class StructureCheckTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("external reviewer code is fail-closed", result.stderr)
 
+    def test_adoption_signature_schema_rejects_extra_fields(self) -> None:
+        relative = "plugins/project-adoption/shared/signatures.json"
+        signatures = self.read_json(relative)
+        signatures["command"] = "python3"
+        self.write_json(relative, signatures)
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsupported top-level fields", result.stderr)
+
+    def test_adoption_signature_schema_rejects_invalid_regex(self) -> None:
+        relative = "plugins/project-adoption/shared/signatures.json"
+        signatures = self.read_json(relative)
+        signatures["content_patterns"][0]["pattern"] = "["
+        self.write_json(relative, signatures)
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid regex", result.stderr)
+
     def test_invalid_utf8_runtime_file_fails_closed(self) -> None:
         script = self.root / "plugins/work-system/lib/launch.sh"
         script.parent.mkdir(parents=True)
@@ -420,8 +488,11 @@ class StructureCheckTests(unittest.TestCase):
 
     def test_swarm_source_version_must_match_upstream_state(self) -> None:
         parity_path = self.root / "docs/parity.md"
+        version = self.read_json(
+            ".agents/upstream/claude-plugins.json"
+        )["plugins"]["swarm"]["source_version"]
         parity = parity_path.read_text(encoding="utf-8").replace(
-            "| swarm | 0.3.0 at `", "| swarm | 0.2.0 at `"
+            f"| swarm | {version} at `", "| swarm | 0.2.0 at `"
         )
         parity_path.write_text(parity, encoding="utf-8")
         result = self.run_check()
@@ -430,10 +501,20 @@ class StructureCheckTests(unittest.TestCase):
 
     def test_swarm_last_sync_must_match_upstream_state(self) -> None:
         parity_path = self.root / "docs/parity.md"
-        parity = parity_path.read_text(encoding="utf-8").replace(
-            "| swarm | 0.3.0 at `ee7bb2db650fb790530c7310be4b317a3e49bb56` | missing | missing | 2026-07-12 / `ee7bb2db650fb790530c7310be4b317a3e49bb56` |",
-            "| swarm | 0.3.0 at `ee7bb2db650fb790530c7310be4b317a3e49bb56` | missing | missing | 2026-07-11 / `deadbeefdeadbeefdeadbeefdeadbeefdeadbeef` |",
+        original = parity_path.read_text(encoding="utf-8")
+        state = self.read_json(".agents/upstream/claude-plugins.json")
+        upstream = state["upstream"]
+        version = state["plugins"]["swarm"]["source_version"]
+        original_prefix = (
+            f"| swarm | {version} at `{upstream['last_reviewed_commit']}` | missing | missing | "
+            f"{upstream['last_reviewed_date']} / `{upstream['last_reviewed_commit']}` |"
         )
+        stale_prefix = (
+            f"| swarm | {version} at `{upstream['last_reviewed_commit']}` | missing | missing | "
+            "2026-07-11 / `deadbeefdeadbeefdeadbeefdeadbeefdeadbeef` |"
+        )
+        parity = original.replace(original_prefix, stale_prefix)
+        self.assertNotEqual(parity, original)
         parity_path.write_text(parity, encoding="utf-8")
         result = self.run_check()
         self.assertNotEqual(result.returncode, 0)
@@ -441,13 +522,18 @@ class StructureCheckTests(unittest.TestCase):
 
     def test_readme_must_include_swarm_source_version(self) -> None:
         readme_path = self.root / "README.md"
+        version = self.read_json(
+            ".agents/upstream/claude-plugins.json"
+        )["plugins"]["swarm"]["source_version"]
         readme = readme_path.read_text(encoding="utf-8").replace(
-            ", swarm 0.3.0", ""
+            f", swarm {version}", ""
         )
         readme_path.write_text(readme, encoding="utf-8")
         result = self.run_check()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("missing tracked source version swarm 0.3.0", result.stderr)
+        self.assertIn(
+            f"missing tracked source version swarm {version}", result.stderr
+        )
 
 
 if __name__ == "__main__":
