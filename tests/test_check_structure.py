@@ -397,6 +397,19 @@ class StructureCheckTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("unsupported Grok manifest field", result.stderr)
 
+    def test_grok_marketplace_non_string_name_fails_cleanly(self) -> None:
+        relative = ".grok-plugin/marketplace.json"
+        data = self.read_json(relative)
+        # valid + bad non-string name
+        data["plugins"] = [
+            {"name": "project-adoption", "source": {"source": "local", "path": "./plugins/project-adoption"}},
+            {"name": ["bad-list-name"]}
+        ]
+        self.write_json(relative, data)
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("every plugin name must be a non-empty string", result.stderr)
+
     def test_external_reviewer_code_is_fail_closed(self) -> None:
         script = self.root / "plugins/swarm/reviewers/anthropic/review.sh"
         script.parent.mkdir(parents=True)

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import re
 import sys
 from pathlib import Path
@@ -389,6 +390,7 @@ def validate_grok_marketplace() -> None:
     names = [e.get("name") for e in entries if isinstance(e, dict)]
     if any(not isinstance(n, str) or not n.strip() for n in names):
         fail(f"{relative}: every plugin name must be a non-empty string")
+        return
     if len(names) != len(set(names)):
         fail(f"{relative}: duplicate plugin names are not allowed")
     expected = set(AVAILABLE_GROK_PLUGINS)
@@ -561,6 +563,7 @@ def _validate_frontmatter(text: str | None, relative: str, expected_name: str) -
 def validate_project_adoption_slice() -> None:
     required = (
         "plugins/project-adoption/shared/audit_project.py",
+        "plugins/project-adoption/shared/ADOPTION_AUDIT.md",
         ADOPTION_SIGNATURES,
         "plugins/project-adoption/skills/adopt-claude-project/SKILL.md",
         "plugins/project-adoption/skills/adopt-claude-project/agents/openai.yaml",
@@ -614,8 +617,12 @@ def validate_project_adoption_slice() -> None:
     grok_skill_relative = "plugins/project-adoption/grok/skills/adopt-claude-project/SKILL.md"
     grok_skill = load_text(grok_skill_relative)
     _validate_frontmatter(grok_skill, grok_skill_relative, "adopt-claude-project")
-    if grok_skill is not None and "shared/audit_project.py" not in grok_skill:
-        fail(f"{grok_skill_relative}: Grok adapter skill must reference the shared auditor (shared/audit_project.py)")
+    audit_ref = "shared/audit_project.py"
+    grok_audit_md = "plugins/project-adoption/shared/ADOPTION_AUDIT.md"
+    has_ref = (grok_skill is not None and audit_ref in grok_skill) or \
+              (os.path.exists(grok_audit_md) and audit_ref in (ROOT / grok_audit_md).read_text(encoding="utf-8", errors="ignore"))
+    if not has_ref:
+        fail(f"{grok_skill_relative}: Grok adapter must reference the shared auditor (shared/audit_project.py in SKILL or shared/ADOPTION_AUDIT.md)")
 
 
 def validate_adapter_boundaries() -> None:

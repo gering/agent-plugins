@@ -13,8 +13,8 @@ until their skills and behavioral checks exist. See the [parity ledger](docs/par
 ## Tracked upstream
 
 - Repository: `gering/claude-plugins`
-- Reviewed commit: `59996c259786eb2d4d6b9805925439745eb5c6e3`
-- Review date: 2026-07-13
+- Reviewed commit: `9fd980c7e72352fec4e6d143053f7d2d4e1931b2`
+- Review date: 2026-07-14
 - Upstream versions: knowledge-system 1.8.2, work-system 1.6.0,
   pr-flow 1.2.3, swarm 0.3.1
 - Uncommitted upstream changes were detected and explicitly excluded.
@@ -79,14 +79,22 @@ delegating to shared read-only auditor).
 The repeatable local flow is:
 
 ```bash
-grok plugin marketplace add /path/to/agent-plugins
+# 1. Register the marketplace (local checkout)
+grok plugin marketplace add /absolute/path/to/agent-plugins
 grok plugin marketplace list
-grok plugin validate plugins/project-adoption
-grok plugin install project-adoption   # or from marketplace source
+
+# 2. Marketplace install (via TUI `/marketplace` or after registration)
+#    or Direct install from source:
+grok plugin validate ./plugins/project-adoption
+grok plugin install ./plugins/project-adoption
 ```
 
-After install, start a fresh session (or use `grok inspect`) to discover the
-skill. Invoke with `/adopt-claude-project <target>`.
+Validate always with a directory path (not plugin name). After install start
+a fresh session (or use `grok inspect`) to discover the skill. Invoke with
+`/adopt-claude-project <target>` (use qualified name if collisions, e.g.
+`project-adoption:adopt-claude-project`).
+
+See [Grok installation](docs/grok-installation.md) for details.
 
 See [Grok installation](docs/grok-installation.md) for validation and update
 details.
