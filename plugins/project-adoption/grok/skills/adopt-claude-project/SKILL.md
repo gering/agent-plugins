@@ -7,14 +7,15 @@ description: Audit an existing Claude-oriented repository for safe Codex and Gro
 
 This is the **thin** native Grok adapter for the project-adoption plugin.
 
-It delegates the common audit, reporting and safety semantics to the
+It delegates the common audit, reporting, and safety semantics to the
 agent-neutral reference shipped in `shared/ADOPTION_AUDIT.md` (part of the
 plugin). Only Grok-specific installation, path resolution, invocation and
 notes live in this adapter file.
 
-**Common procedure:** Read and follow the instructions in the resolved
-`<plugin-root>/shared/ADOPTION_AUDIT.md` (agent-neutral reference shipped
-with the plugin).
+Resolve the plugin root with `grok plugin details project-adoption` and use its
+`path` value. Then read and follow `<plugin-root>/shared/ADOPTION_AUDIT.md`.
+It is the single agent-neutral source for audit, reporting, and safety
+semantics. Do not replace it with runtime-specific behavior.
 
 ## Grok-specific notes
 
@@ -22,16 +23,12 @@ with the plugin).
   `grok plugin validate ./plugins/project-adoption`
   `grok plugin install ./plugins/project-adoption`
 - The skill appears under `plugin: project-adoption` in `grok inspect`.
-  If name collision with global skills use qualified form e.g.
-  `project-adoption:adopt-claude-project`.
 - Invoke with `/adopt-claude-project <target>`.
-- Uses `GROK_PLUGIN_ROOT` / `GROK_PLUGIN_DATA` (hooks); skills derive paths
-  from the loaded SKILL.md location or `grok plugin details`.
 - Validate the installed plugin with `grok plugin validate <dir>` if needed.
 
-**Name collision note:** Grok may discover a global `~/.grok/skills/adopt-claude-project`
-in addition to the plugin skill. Use the qualified name shown by `grok inspect`
-(e.g. `project-adoption:adopt-claude-project`) or run in a fresh `GROK_HOME`
-environment (no global skills) to guarantee the plugin version is used.
-The dogfood against `muellmann-app.de` was performed with the installed plugin
-in an environment without the conflicting global skill.
+**Name collision note:** Before invoking, inspect the matching skill entries
+with `grok inspect --json`. If a global
+`~/.grok/skills/adopt-claude-project` is also active, do not use the ambiguous
+slash command. Run with an isolated `GROK_HOME` that contains only the plugin,
+or ask the user to rename or disable the legacy global skill first. Grok 0.2.99
+does not expose a documented qualified slash-command syntax.

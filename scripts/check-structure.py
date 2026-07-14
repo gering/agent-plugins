@@ -3,9 +3,8 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
-import os
+import json
 import re
 import sys
 from pathlib import Path
@@ -613,16 +612,21 @@ def validate_project_adoption_slice() -> None:
 
     _validate_frontmatter(skill, skill_relative, "adopt-claude-project")
 
-    # Grok native adapter skill (thin prompt + invocation; delegates to shared auditor)
-    grok_skill_relative = "plugins/project-adoption/grok/skills/adopt-claude-project/SKILL.md"
+    # Grok native adapter skill (thin prompt + invocation)
+    grok_skill_relative = (
+        "plugins/project-adoption/grok/skills/adopt-claude-project/SKILL.md"
+    )
     grok_skill = load_text(grok_skill_relative)
     _validate_frontmatter(grok_skill, grok_skill_relative, "adopt-claude-project")
-    audit_ref = "shared/audit_project.py"
-    grok_audit_md = "plugins/project-adoption/shared/ADOPTION_AUDIT.md"
-    has_ref = (grok_skill is not None and audit_ref in grok_skill) or \
-              (os.path.exists(grok_audit_md) and audit_ref in (ROOT / grok_audit_md).read_text(encoding="utf-8", errors="ignore"))
-    if not has_ref:
-        fail(f"{grok_skill_relative}: Grok adapter must reference the shared auditor (shared/audit_project.py in SKILL or shared/ADOPTION_AUDIT.md)")
+    workflow_relative = "plugins/project-adoption/shared/ADOPTION_AUDIT.md"
+    workflow = load_text(workflow_relative)
+    workflow_reference = "shared/ADOPTION_AUDIT.md"
+    if skill is not None and workflow_reference not in skill:
+        fail(f"{skill_relative}: Codex adapter must reference {workflow_reference}")
+    if grok_skill is not None and workflow_reference not in grok_skill:
+        fail(f"{grok_skill_relative}: Grok adapter must reference {workflow_reference}")
+    if workflow is not None and "shared/audit_project.py" not in workflow:
+        fail(f"{workflow_relative}: shared workflow must reference shared/audit_project.py")
 
 
 def validate_adapter_boundaries() -> None:

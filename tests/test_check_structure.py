@@ -58,12 +58,34 @@ class StructureCheckTests(unittest.TestCase):
         result = self.run_check()
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_repository_check_is_independent_of_current_directory(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(self.root / "scripts/check-structure.py")],
+            cwd=self.tempdir.name,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_available_project_adoption_skill_requires_valid_frontmatter(self) -> None:
         skill = self.root / "plugins/project-adoption/skills/adopt-claude-project/SKILL.md"
         skill.write_text("---\n---\n", encoding="utf-8")
         result = self.run_check()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("frontmatter", result.stderr)
+
+    def test_codex_adoption_adapter_requires_shared_workflow(self) -> None:
+        skill = self.root / "plugins/project-adoption/skills/adopt-claude-project/SKILL.md"
+        skill.write_text(
+            skill.read_text(encoding="utf-8").replace(
+                "shared/ADOPTION_AUDIT.md", "shared/missing.md"
+            ),
+            encoding="utf-8",
+        )
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Codex adapter must reference", result.stderr)
 
     def test_available_project_adoption_agent_metadata_requires_interface(self) -> None:
         agent = self.root / (

@@ -32,8 +32,8 @@ grok plugin install ./plugins/project-adoption
 grok plugin details project-adoption
 ```
 
-Marketplace installation is typically done via the TUI (`/marketplace` tab)
-after registering the source. See README for examples.
+Marketplace installation is typically done by opening `/plugins` in the TUI
+and selecting the Marketplace tab after registering the source.
 
 Do not use `--trust` in the documented default flow. Users should see Grok's
 trust confirmation for a new local or Git source.
