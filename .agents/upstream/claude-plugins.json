@@ -3,11 +3,11 @@
   "upstream": {
     "repository": "https://github.com/gering/claude-plugins.git",
     "local_path_hint": "../claude-plugins",
-    "last_reviewed_commit": "59996c259786eb2d4d6b9805925439745eb5c6e3",
-    "last_reviewed_date": "2026-07-13",
+    "last_reviewed_commit": "9fd980c7e72352fec4e6d143053f7d2d4e1931b2",
+    "last_reviewed_date": "2026-07-14",
     "dirty_worktree_excluded": true,
-    "latest_observed_commit": "59996c259786eb2d4d6b9805925439745eb5c6e3",
-    "latest_observed_date": "2026-07-13"
+    "latest_observed_commit": "9fd980c7e72352fec4e6d143053f7d2d4e1931b2",
+    "latest_observed_date": "2026-07-14"
   },
   "plugins": {
     "project-adoption": {
@@ -32,7 +32,7 @@
     },
     "swarm": {
       "source_plugin": "swarm",
-      "source_version": "0.3.1",
+      "source_version": "0.4.0",
       "imported_capabilities": []
     }
   },

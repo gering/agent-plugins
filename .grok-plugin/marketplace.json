@@ -4,5 +4,11 @@
   "owner": {
     "name": "gering"
   },
-  "plugins": []
+  "plugins": [
+    {
+      "name": "project-adoption",
+      "source": "./plugins/project-adoption",
+      "description": "Run a POSIX-only, read-only audit before adopting Codex or Grok."
+    }
+  ]
 }

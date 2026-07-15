@@ -1,11 +1,12 @@
 {
   "name": "project-adoption",
-  "version": "0.1.0+codex.20260713111621",
+  "version": "0.1.0+codex.20260714121201",
   "description": "Run a POSIX-only, read-only audit before adopting Codex or Grok.",
   "author": {
     "name": "gering"
   },
   "repository": "https://github.com/gering/agent-plugins",
   "license": "MIT",
-  "keywords": ["adoption", "migration", "codex", "grok"]
+  "keywords": ["adoption", "migration", "codex", "grok"],
+  "skills": "./grok/skills/"
 }
