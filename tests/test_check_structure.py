@@ -96,14 +96,14 @@ class StructureCheckTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("root must be interface", result.stderr)
 
-    def test_available_unfinished_plugin_fails(self) -> None:
+    def test_unfinished_work_system_cannot_be_advertised(self) -> None:
         relative = ".agents/plugins/marketplace.json"
         marketplace = self.read_json(relative)
-        marketplace["plugins"][1]["policy"]["installation"] = "AVAILABLE"
+        marketplace["plugins"][2]["policy"]["installation"] = "AVAILABLE"
         self.write_json(relative, marketplace)
         result = self.run_check()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("knowledge-system must use installation policy NOT_AVAILABLE", result.stderr)
+        self.assertIn("work-system must use installation policy NOT_AVAILABLE", result.stderr)
 
     def test_project_adoption_must_be_available(self) -> None:
         relative = ".agents/plugins/marketplace.json"
@@ -146,6 +146,55 @@ class StructureCheckTests(unittest.TestCase):
         result = self.run_check()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("available slice is missing required file", result.stderr)
+
+    def test_knowledge_system_requires_shared_helper(self) -> None:
+        (self.root / "plugins/knowledge-system/shared/knowledge_tool.py").unlink()
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("knowledge-system native slice is missing required file", result.stderr)
+
+    def test_knowledge_skill_requires_valid_frontmatter(self) -> None:
+        skill = self.root / "plugins/knowledge-system/skills/query/SKILL.md"
+        skill.write_text("---\nname: query\n---\n", encoding="utf-8")
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("frontmatter", result.stderr)
+
+    def test_knowledge_codex_metadata_mentions_skill(self) -> None:
+        metadata = self.root / (
+            "plugins/knowledge-system/skills/reindex/agents/openai.yaml"
+        )
+        metadata.write_text(
+            metadata.read_text(encoding="utf-8").replace("$reindex", "$query"),
+            encoding="utf-8",
+        )
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("default_prompt must mention $reindex", result.stderr)
+
+    def test_knowledge_grok_adapter_requires_shared_workflow(self) -> None:
+        skill = self.root / "plugins/knowledge-system/grok/skills/query/SKILL.md"
+        skill.write_text(
+            skill.read_text(encoding="utf-8").replace(
+                "shared/KNOWLEDGE_WORKFLOWS.md", "shared/missing.md"
+            ),
+            encoding="utf-8",
+        )
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("native adapter must reference", result.stderr)
+
+    def test_knowledge_helper_must_keep_reindex_check_gate(self) -> None:
+        helper = self.root / "plugins/knowledge-system/shared/knowledge_tool.py"
+        helper.write_text(
+            helper.read_text(encoding="utf-8").replace(
+                "reindex currently requires --check", "reindex can write"
+            ),
+            encoding="utf-8",
+        )
+        result = self.run_check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must fail closed without --check", result.stderr)
 
     def test_duplicate_marketplace_name_fails(self) -> None:
         relative = ".agents/plugins/marketplace.json"
@@ -204,6 +253,13 @@ class StructureCheckTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("forbidden Claude executable", result.stderr)
 
+    def test_compatibility_knowledge_path_is_not_a_claude_executable(self) -> None:
+        script = self.root / "plugins/work-system/shared/paths.py"
+        script.parent.mkdir(parents=True)
+        script.write_text('KNOWLEDGE = ".claude/knowledge"\n', encoding="utf-8")
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_unbraced_plugin_root_in_shared_helper_fails(self) -> None:
         script = self.root / "plugins/work-system/shared/launch.sh"
         script.parent.mkdir(parents=True)
@@ -250,10 +306,10 @@ class StructureCheckTests(unittest.TestCase):
         original = parity_path.read_text(encoding="utf-8")
         upstream = self.read_json(".agents/upstream/claude-plugins.json")["upstream"]
         parity = original.replace(
-            f"{upstream['last_reviewed_date']} / `{upstream['last_reviewed_commit']}` | "
-            "Native memories",
+            f"| knowledge-system | 1.9.0 at `{upstream['last_reviewed_commit']}` | partial | partial | "
+            f"{upstream['last_reviewed_date']} / `{upstream['last_reviewed_commit']}` |",
+            f"| knowledge-system | 1.9.0 at `{upstream['last_reviewed_commit']}` | partial | partial | "
             "2026-07-11 / `deadbeefdeadbeefdeadbeefdeadbeefdeadbeef` | "
-            "Native memories",
         )
         self.assertNotEqual(parity, original)
         parity_path.write_text(parity, encoding="utf-8")
@@ -378,8 +434,8 @@ class StructureCheckTests(unittest.TestCase):
     def test_readme_versions_are_associated_with_plugins(self) -> None:
         readme_path = self.root / "README.md"
         readme = readme_path.read_text(encoding="utf-8")
-        readme = readme.replace("knowledge-system 1.8.2", "knowledge-system 1.6.0")
-        readme = readme.replace("work-system 1.6.0", "work-system 1.8.2")
+        readme = readme.replace("knowledge-system 1.9.0", "knowledge-system 1.7.0")
+        readme = readme.replace("work-system 1.7.0", "work-system 1.9.0")
         readme_path.write_text(readme, encoding="utf-8")
         result = self.run_check()
         self.assertNotEqual(result.returncode, 0)

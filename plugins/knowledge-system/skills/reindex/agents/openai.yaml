@@ -1,0 +1,4 @@
+interface:
+  display_name: "Check Knowledge Index"
+  short_description: "Audit knowledge indexes without writing"
+  default_prompt: "Use $reindex to audit the knowledge base in read-only mode."

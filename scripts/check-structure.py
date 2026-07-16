@@ -15,8 +15,8 @@ from urllib.parse import urlparse
 ROOT = Path(__file__).resolve().parents[1]
 PLUGINS = ("project-adoption", "knowledge-system", "work-system", "pr-flow")
 UPSTREAM_PLUGINS = (*PLUGINS, "swarm")
-AVAILABLE_CODEX_PLUGINS = {"project-adoption"}
-AVAILABLE_GROK_PLUGINS = {"project-adoption"}
+AVAILABLE_CODEX_PLUGINS = {"project-adoption", "knowledge-system"}
+AVAILABLE_GROK_PLUGINS = {"project-adoption", "knowledge-system"}
 ALLOWED_AUTHENTICATION = {"ON_INSTALL", "ON_USE"}
 ALLOWED_MANIFEST_KEYS = {
     "id",
@@ -87,7 +87,7 @@ FORBIDDEN_REFERENCE_PATTERNS = (
     (
         "Claude executable",
         re.compile(
-            r"(?<![A-Za-z0-9_-])(?:[^\s\"'`|;&()]*/)?"
+            r"(?<![A-Za-z0-9_.-])(?:[^\s\"'`|;&()]*/)?"
             r"claude(?:\.(?:exe|cmd|bat))?(?![A-Za-z0-9_.-])",
             re.IGNORECASE,
         ),
@@ -99,7 +99,7 @@ FORBIDDEN_REFERENCE_PATTERNS = (
     ),
 )
 CLAUDE_DOC_COMMAND = re.compile(
-    r"(?<![A-Za-z0-9_-])(?:[^\s\"'`|;&()]*/)?"
+    r"(?<![A-Za-z0-9_.-])(?:[^\s\"'`|;&()]*/)?"
     r"claude(?:\.(?:exe|cmd|bat))?"
     r"(?:\s+(?:--?[A-Za-z0-9]|resume\b|continue\b)|(?=`))",
     re.IGNORECASE,
@@ -559,6 +559,39 @@ def _validate_frontmatter(text: str | None, relative: str, expected_name: str) -
         fail(f"{relative}: unresolved TODO marker")
 
 
+def _validate_openai_metadata(relative: str, expected_skill: str) -> None:
+    agent = load_text(relative)
+    if agent is None:
+        return
+    lines = agent.splitlines()
+    values: dict[str, str] = {}
+    if not lines or lines[0] != "interface:":
+        fail(f"{relative}: root must be interface")
+    for line in lines[1:]:
+        match = re.fullmatch(r"  ([a-z_]+):\s*(.+)", line)
+        if not match or match.group(1) in values:
+            fail(f"{relative}: malformed interface metadata")
+            continue
+        try:
+            value = json.loads(match.group(2))
+        except json.JSONDecodeError:
+            fail(f"{relative}: interface values must be quoted strings")
+            continue
+        if not isinstance(value, str) or not value.strip():
+            fail(f"{relative}: interface values must be non-empty strings")
+            continue
+        values[match.group(1)] = value
+    if set(values) != {"display_name", "short_description", "default_prompt"}:
+        fail(f"{relative}: interface fields do not match the required schema")
+    short_description = values.get("short_description", "")
+    if short_description and not 25 <= len(short_description) <= 64:
+        fail(f"{relative}: short_description must be 25-64 characters")
+    if f"${expected_skill}" not in values.get("default_prompt", ""):
+        fail(f"{relative}: default_prompt must mention ${expected_skill}")
+    if "TODO" in agent:
+        fail(f"{relative}: unresolved TODO marker")
+
+
 def validate_project_adoption_slice() -> None:
     required = (
         "plugins/project-adoption/shared/audit_project.py",
@@ -627,6 +660,54 @@ def validate_project_adoption_slice() -> None:
         fail(f"{grok_skill_relative}: Grok adapter must reference {workflow_reference}")
     if workflow is not None and "shared/audit_project.py" not in workflow:
         fail(f"{workflow_relative}: shared workflow must reference shared/audit_project.py")
+
+
+def validate_knowledge_system_slice() -> None:
+    required = (
+        "plugins/knowledge-system/shared/knowledge_tool.py",
+        "plugins/knowledge-system/shared/KNOWLEDGE_WORKFLOWS.md",
+        "plugins/knowledge-system/skills/query/SKILL.md",
+        "plugins/knowledge-system/skills/query/agents/openai.yaml",
+        "plugins/knowledge-system/skills/reindex/SKILL.md",
+        "plugins/knowledge-system/skills/reindex/agents/openai.yaml",
+        "plugins/knowledge-system/grok/skills/query/SKILL.md",
+        "plugins/knowledge-system/grok/skills/reindex/SKILL.md",
+        "tests/test_knowledge_system.py",
+    )
+    for relative in required:
+        if not (ROOT / relative).is_file():
+            fail(f"knowledge-system native slice is missing required file: {relative}")
+
+    workflow_reference = "shared/KNOWLEDGE_WORKFLOWS.md"
+    for runtime_root in ("skills", "grok/skills"):
+        for skill_name in ("query", "reindex"):
+            relative = f"plugins/knowledge-system/{runtime_root}/{skill_name}/SKILL.md"
+            skill = load_text(relative)
+            _validate_frontmatter(skill, relative, skill_name)
+            if skill is not None and workflow_reference not in skill:
+                fail(f"{relative}: native adapter must reference {workflow_reference}")
+
+    for skill_name in ("query", "reindex"):
+        _validate_openai_metadata(
+            f"plugins/knowledge-system/skills/{skill_name}/agents/openai.yaml",
+            skill_name,
+        )
+
+    workflow = load_text("plugins/knowledge-system/shared/KNOWLEDGE_WORKFLOWS.md")
+    if workflow is not None:
+        for required_text in ("knowledge_tool.py query", "reindex --check", "read-only"):
+            if required_text not in workflow:
+                fail(
+                    "plugins/knowledge-system/shared/KNOWLEDGE_WORKFLOWS.md: "
+                    f"missing required native workflow marker {required_text!r}"
+                )
+
+    helper = load_text("plugins/knowledge-system/shared/knowledge_tool.py")
+    if helper is not None:
+        if "reindex currently requires --check" not in helper:
+            fail("knowledge-system shared helper must fail closed without --check")
+        if "followlinks=False" not in helper or "O_NOFOLLOW" not in helper:
+            fail("knowledge-system shared helper must reject symlink traversal")
 
 
 def validate_adapter_boundaries() -> None:
@@ -807,6 +888,7 @@ def main() -> int:
     validate_grok_marketplace()
     validate_adoption_signatures()
     validate_project_adoption_slice()
+    validate_knowledge_system_slice()
     validate_adapter_boundaries()
 
     if errors:

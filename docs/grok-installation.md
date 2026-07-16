@@ -1,6 +1,6 @@
 # Grok installation
 
-Grok Build 0.2.99 was inspected on 2026-07-14. It exposes native `plugin
+Grok Build 0.2.101 was inspected on 2026-07-16. It exposes native `plugin
 install`, `plugin marketplace`, `plugin validate`, `--continue`, and `--resume`
 interfaces. This repository uses those native surfaces.
 
@@ -19,8 +19,8 @@ Refresh a registered marketplace after pulling changes:
 grok plugin marketplace update
 ```
 
-`project-adoption` is advertised once its manifest, skills and runtime
-behavior pass validation.
+`project-adoption` and the read-only `knowledge-system` slice are advertised
+after their manifests, skills, runtime behavior, and fixture checks pass.
 
 ## Direct development installation
 
@@ -30,6 +30,9 @@ Validate before installation (always use directory path):
 grok plugin validate ./plugins/project-adoption
 grok plugin install ./plugins/project-adoption
 grok plugin details project-adoption
+grok plugin validate ./plugins/knowledge-system
+grok plugin install ./plugins/knowledge-system
+grok plugin details knowledge-system
 ```
 
 Marketplace installation is typically done by opening `/plugins` in the TUI

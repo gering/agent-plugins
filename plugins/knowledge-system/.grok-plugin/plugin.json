@@ -1,11 +1,12 @@
 {
   "name": "knowledge-system",
-  "version": "0.1.0",
-  "description": "Keep durable project knowledge versioned and agent-neutral.",
+  "version": "0.2.0+codex.20260716080216",
+  "description": "Query and audit durable project knowledge with native Grok workflows.",
   "author": {
     "name": "gering"
   },
   "repository": "https://github.com/gering/agent-plugins",
   "license": "MIT",
-  "keywords": ["knowledge", "memory", "codex", "grok"]
+  "keywords": ["knowledge", "memory", "query", "reindex", "codex", "grok"],
+  "skills": "./grok/skills/"
 }
