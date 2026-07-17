@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -7,10 +8,16 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "plugins/knowledge-system/shared/knowledge_tool.py"
+SPEC = importlib.util.spec_from_file_location("knowledge_tool_tests", TOOL)
+assert SPEC is not None and SPEC.loader is not None
+KNOWLEDGE_TOOL = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = KNOWLEDGE_TOOL
+SPEC.loader.exec_module(KNOWLEDGE_TOOL)
 
 
 class KnowledgeSystemTests(unittest.TestCase):
@@ -30,6 +37,9 @@ class KnowledgeSystemTests(unittest.TestCase):
 title: Authentication flow
 createdAt: 2026-07-01
 updatedAt: 2026-07-02
+createdFrom: "PR #1"
+updatedFrom: "PR #2"
+reindexedAt: 2026-07-03
 pluginVersion: 1.9.0
 prime: true
 ---
@@ -78,6 +88,42 @@ Request authentication validates a session token before routing.
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("No matching documented knowledge found", result.stdout)
 
+    def test_query_uses_index_description_to_route_to_content(self) -> None:
+        self.write(
+            "_index.md",
+            "# Knowledge Index\n\n"
+            "- `architecture/auth.md` — Sprocket gateway behavior\n",
+        )
+        result = self.run_tool("query", "sprocket", "--format", "json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(
+            payload["matches"][0]["path"],
+            ".claude/knowledge/architecture/auth.md",
+        )
+
+    def test_query_prioritizes_unique_topic_over_generic_question_words(self) -> None:
+        entries = ["architecture/auth.md", "frobnicator.md"]
+        for index in range(3):
+            relative = f"generic-{index}.md"
+            entries.append(relative)
+            self.write(
+                relative,
+                self.document(f"Generic {index}", "work " * 20),
+            )
+        self.write("frobnicator.md", self.document("Frobnicator", "frobnicator"))
+        self.write(
+            "_index.md",
+            "# Knowledge Index\n\n"
+            + "".join(f"- `{entry}` — entry\n" for entry in entries),
+        )
+        result = self.run_tool(
+            "query", "how does frobnicator work here", "--format", "json"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["matches"][0]["path"], ".claude/knowledge/frobnicator.md")
+
     def test_query_rejects_empty_search_terms(self) -> None:
         result = self.run_tool("query", "the and wie")
         self.assertEqual(result.returncode, 2)
@@ -93,7 +139,7 @@ Request authentication validates a session token before routing.
         empty.mkdir()
         result = self.run_tool("query", "auth", "--root", str(empty))
         self.assertEqual(result.returncode, 2)
-        self.assertIn("missing .claude directory", result.stderr)
+        self.assertIn("missing knowledge directory", result.stderr)
 
     @unittest.skipUnless(hasattr(os, "symlink"), "symlinks unavailable")
     def test_symlinked_knowledge_file_fails_closed(self) -> None:
@@ -119,6 +165,13 @@ Request authentication validates a session token before routing.
         self.assertEqual(first.stdout, second.stdout)
         self.assertEqual(json.loads(first.stdout)["findings"], [])
         self.assertEqual(before, self.snapshot())
+
+    def test_crlf_frontmatter_is_valid(self) -> None:
+        path = self.knowledge / "architecture/auth.md"
+        path.write_bytes(path.read_text(encoding="utf-8").replace("\n", "\r\n").encode())
+        result = self.run_tool("reindex", "--check", "--format", "json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["findings"], [])
 
     def test_reindex_requires_explicit_check_mode(self) -> None:
         before = self.snapshot()
@@ -151,6 +204,26 @@ Request authentication validates a session token before routing.
             {"dead-reference", "missing-frontmatter", "wrong-link-style"}, kinds
         )
 
+    def test_reindex_reports_missing_provenance_metadata(self) -> None:
+        auth_path = self.knowledge / "architecture/auth.md"
+        lines = auth_path.read_text(encoding="utf-8").splitlines()
+        omitted = {"createdFrom", "updatedFrom", "reindexedAt"}
+        auth_path.write_text(
+            "\n".join(
+                line for line in lines if line.partition(":")[0] not in omitted
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        result = self.run_tool("reindex", "--check", "--format", "json")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        missing = {
+            item["detail"]
+            for item in json.loads(result.stdout)["findings"]
+            if item["kind"] == "missing-frontmatter"
+        }
+        self.assertEqual(missing, omitted)
+
     def test_reindex_rejects_link_escaping_project_root(self) -> None:
         auth = (self.knowledge / "architecture/auth.md").read_text(encoding="utf-8")
         self.write("architecture/auth.md", auth + "\n[outside](../../../../outside.md)\n")
@@ -158,6 +231,102 @@ Request authentication validates a session token before routing.
         self.assertEqual(result.returncode, 1, result.stderr)
         findings = json.loads(result.stdout)["findings"]
         self.assertTrue(any(item["kind"] == "unsafe-link" for item in findings))
+
+    def test_reindex_handles_markdown_examples_spaces_and_parentheses(self) -> None:
+        docs = self.root / "docs"
+        docs.mkdir()
+        (docs / "file with space.md").write_text("# Space\n", encoding="utf-8")
+        (docs / "guide_(v2).md").write_text("# Parentheses\n", encoding="utf-8")
+        auth_path = self.knowledge / "architecture/auth.md"
+        auth = auth_path.read_text(encoding="utf-8")
+        auth += """
+\[escaped\](missing.md)
+`[inline](missing.md)`
+```markdown
+[fenced](missing.md)
+```
+[space](<../../../docs/file with space.md>)
+[parentheses](../../../docs/guide_(v2).md)
+"""
+        auth_path.write_text(auth, encoding="utf-8")
+        result = self.run_tool("reindex", "--check", "--format", "json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["findings"], [])
+
+    def test_reindex_rejects_impossible_calendar_date(self) -> None:
+        auth_path = self.knowledge / "architecture/auth.md"
+        auth_path.write_text(
+            auth_path.read_text(encoding="utf-8").replace(
+                "updatedAt: 2026-07-02", "updatedAt: 2026-99-99"
+            ),
+            encoding="utf-8",
+        )
+        result = self.run_tool("reindex", "--check", "--format", "json")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        findings = json.loads(result.stdout)["findings"]
+        self.assertTrue(
+            any(
+                item["kind"] == "invalid-frontmatter"
+                and item["detail"] == "updatedAt=2026-99-99"
+                for item in findings
+            )
+        )
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlinks unavailable")
+    def test_directory_swap_during_scan_fails_closed(self) -> None:
+        section = self.knowledge / "section"
+        section.mkdir()
+        original_text = self.document("Inside", "needle")
+        external_text = self.document("Escape", "needle")
+        self.assertEqual(len(original_text.encode()), len(external_text.encode()))
+        (section / "doc.md").write_text(original_text, encoding="utf-8")
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "doc.md").write_text(external_text, encoding="utf-8")
+
+        original_reader = KNOWLEDGE_TOOL.read_regular_file_at
+        swapped = False
+
+        def swap_then_read(directory_descriptor, name, shown_path, size):
+            nonlocal swapped
+            if name == "doc.md" and not swapped:
+                swapped = True
+                section.rename(section.with_name("section-old"))
+                section.symlink_to(outside, target_is_directory=True)
+            return original_reader(directory_descriptor, name, shown_path, size)
+
+        with mock.patch.object(
+            KNOWLEDGE_TOOL, "read_regular_file_at", side_effect=swap_then_read
+        ):
+            with self.assertRaisesRegex(
+                KNOWLEDGE_TOOL.KnowledgeError, "changed during inspection"
+            ):
+                KNOWLEDGE_TOOL.query_report(str(self.root), "needle", 3)
+
+    def test_unsupported_secure_io_fails_closed(self) -> None:
+        with mock.patch.object(
+            KNOWLEDGE_TOOL, "secure_io_supported", return_value=False
+        ):
+            with self.assertRaisesRegex(
+                KNOWLEDGE_TOOL.KnowledgeError, "requires POSIX"
+            ):
+                KNOWLEDGE_TOOL.query_report(str(self.root), "auth", 3)
+
+    @staticmethod
+    def document(title: str, body: str) -> str:
+        return f"""---
+title: {title}
+createdAt: 2026-07-01
+updatedAt: 2026-07-02
+createdFrom: "PR #1"
+updatedFrom: "PR #2"
+reindexedAt: 2026-07-03
+pluginVersion: 1.9.0
+prime: false
+---
+
+{body}
+"""
 
 
 if __name__ == "__main__":

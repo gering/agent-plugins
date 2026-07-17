@@ -5,6 +5,9 @@ Durable project knowledge remains canonical in the versioned
 hold preferences or local context, but they are not a substitute for these
 files.
 
+The native helper requires POSIX descriptor-relative no-follow I/O and fails
+closed when that containment guarantee is unavailable.
+
 ## Query
 
 Run the shared helper from the target project:
@@ -27,12 +30,13 @@ This first native reindex slice is deliberately read-only:
 python3 <plugin-root>/shared/knowledge_tool.py reindex --check --root .
 ```
 
-It checks root-index coverage, stale index entries, frontmatter shape, Markdown
-links, wikilinks, size limits, UTF-8, and symlink containment. Exit status `0`
+It checks root-index coverage, stale index entries, missing provenance fields,
+calendar-valid frontmatter dates, Markdown links, wikilinks, size limits,
+UTF-8, and descriptor-anchored symlink containment. Exit status `0`
 means clean, `1` means maintenance findings, and `2` means the inspection could
 not complete safely.
 
-Do not edit the knowledge store while following this workflow. Index writes,
-frontmatter backfill, semantic duplicate/staleness analysis, cross-link
+Do not edit the knowledge store while following this workflow. Index and
+frontmatter writes, semantic duplicate/staleness analysis, cross-link
 proposals, and the run log belong to the later approved write-capable slice
 with `curate`.

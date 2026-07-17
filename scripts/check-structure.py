@@ -706,7 +706,11 @@ def validate_knowledge_system_slice() -> None:
     if helper is not None:
         if "reindex currently requires --check" not in helper:
             fail("knowledge-system shared helper must fail closed without --check")
-        if "followlinks=False" not in helper or "O_NOFOLLOW" not in helper:
+        if (
+            "class StoreAnchor" not in helper
+            or "dir_fd=" not in helper
+            or "O_NOFOLLOW" not in helper
+        ):
             fail("knowledge-system shared helper must reject symlink traversal")
 
 
