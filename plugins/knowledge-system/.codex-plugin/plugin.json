@@ -1,6 +1,6 @@
 {
   "name": "knowledge-system",
-  "version": "0.2.0+codex.20260717184031",
+  "version": "0.2.0+codex.20260717223945",
   "description": "Query and audit durable project knowledge with native Codex workflows.",
   "author": {
     "name": "gering"

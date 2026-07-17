@@ -710,8 +710,10 @@ def validate_knowledge_system_slice() -> None:
             "class StoreAnchor" not in helper
             or "dir_fd=" not in helper
             or "O_NOFOLLOW" not in helper
+            or "O_NONBLOCK" not in helper
+            or "file_signature" not in helper
         ):
-            fail("knowledge-system shared helper must reject symlink traversal")
+            fail("knowledge-system shared helper must reject raced path traversal")
 
 
 def validate_adapter_boundaries() -> None:

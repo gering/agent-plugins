@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 import os
 import re
@@ -31,10 +32,10 @@ REQUIRED_FRONTMATTER = (
     "pluginVersion",
     "prime",
 )
-NON_EMPTY_FRONTMATTER = ("title", "createdAt", "updatedAt", "pluginVersion", "prime")
+NON_EMPTY_FRONTMATTER = REQUIRED_FRONTMATTER
 DATE_FIELDS = ("createdAt", "updatedAt", "reindexedAt")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-WIKILINK_RE = re.compile(r"(?<!!)\[\[([^\]]+)\]\]")
+WIKILINK_RE = re.compile(r"!?\[\[([^\]]+)\]\]")
 INDEX_ENTRY_RE = re.compile(
     r"(?m)^\s*-\s+`([^`\n]+\.md)`(?:\s*(?:—|-|:)\s*(.*))?$"
 )
@@ -57,7 +58,7 @@ class KnowledgeError(RuntimeError):
 class KnowledgeFile:
     relative: str
     title: str
-    text: str
+    body: str
     frontmatter: dict[str, str]
 
 
@@ -72,10 +73,21 @@ def display_path(path: Path) -> str:
     return os.fsencode(path.as_posix()).decode("utf-8", "backslashreplace")
 
 
+def file_signature(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
 def secure_io_supported() -> bool:
     return (
         os.name == "posix"
         and hasattr(os, "O_NOFOLLOW")
+        and hasattr(os, "O_NONBLOCK")
         and os.open in getattr(os, "supports_dir_fd", set())
         and os.stat in getattr(os, "supports_dir_fd", set())
     )
@@ -179,18 +191,25 @@ class StoreAnchor:
 
 
 def read_regular_file_at(
-    directory_descriptor: int, name: str, shown_path: Path, size: int
+    directory_descriptor: int,
+    name: str,
+    shown_path: Path,
+    expected: os.stat_result,
 ) -> str:
-    if size > MAX_FILE_BYTES:
+    if expected.st_size > MAX_FILE_BYTES:
         raise KnowledgeError(
             f"knowledge file exceeds {MAX_FILE_BYTES} bytes: {display_path(shown_path)}"
         )
-    descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_descriptor)
+    descriptor = os.open(
+        name,
+        os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+        dir_fd=directory_descriptor,
+    )
     try:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
             raise KnowledgeError(f"not a regular file: {display_path(shown_path)}")
-        if metadata.st_size != size or metadata.st_size > MAX_FILE_BYTES:
+        if file_signature(metadata) != file_signature(expected):
             raise KnowledgeError(
                 f"knowledge file changed during read: {display_path(shown_path)}"
             )
@@ -206,6 +225,10 @@ def read_regular_file_at(
         if len(payload) > MAX_FILE_BYTES:
             raise KnowledgeError(
                 f"knowledge file exceeds {MAX_FILE_BYTES} bytes: {display_path(shown_path)}"
+            )
+        if file_signature(os.fstat(descriptor)) != file_signature(metadata):
+            raise KnowledgeError(
+                f"knowledge file changed during read: {display_path(shown_path)}"
             )
         return payload.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
     except UnicodeDecodeError as exc:
@@ -316,15 +339,14 @@ def scan_store(root_argument: str) -> tuple[Path, Path, list[KnowledgeFile]]:
                         f"knowledge store exceeds {MAX_TOTAL_BYTES} readable bytes"
                     )
                 text = read_regular_file_at(
-                    directory_descriptor, name, shown_path, metadata.st_size
+                    directory_descriptor, name, shown_path, metadata
                 )
                 current = os.stat(
                     name, dir_fd=directory_descriptor, follow_symlinks=False
                 )
                 if (
                     not stat.S_ISREG(current.st_mode)
-                    or (current.st_dev, current.st_ino)
-                    != (metadata.st_dev, metadata.st_ino)
+                    or file_signature(current) != file_signature(metadata)
                 ):
                     raise KnowledgeError(
                         "knowledge file changed during inspection: "
@@ -336,7 +358,7 @@ def scan_store(root_argument: str) -> tuple[Path, Path, list[KnowledgeFile]]:
                     KnowledgeFile(
                         relative_text,
                         title_for(relative_text, frontmatter, body),
-                        text,
+                        body,
                         frontmatter,
                     )
                 )
@@ -350,11 +372,33 @@ def scan_store(root_argument: str) -> tuple[Path, Path, list[KnowledgeFile]]:
 
 
 def tokenize(value: str) -> list[str]:
-    return [
-        token
-        for token in (item.casefold() for item in TOKEN_RE.findall(value))
-        if len(token) > 1 and token not in STOP_WORDS
-    ]
+    tokens: list[str] = []
+    for item in TOKEN_RE.findall(value):
+        folded = item.casefold()
+        candidates = [folded]
+        if "-" in folded:
+            candidates.extend(part for part in folded.split("-") if part)
+        tokens.extend(
+            token
+            for token in candidates
+            if len(token) > 1 and token not in STOP_WORDS
+        )
+    return tokens
+
+
+def contains_sequence(tokens: list[str], terms: list[str]) -> bool:
+    if not terms or len(terms) > len(tokens):
+        return False
+    width = len(terms)
+    return any(
+        tokens[index : index + width] == terms
+        for index in range(len(tokens) - width + 1)
+    )
+
+
+def iter_index_entries(record: KnowledgeFile):
+    index_prose = markdown_prose(record.body, mask_inline=False)
+    yield from INDEX_ENTRY_RE.finditer(index_prose)
 
 
 def query_report(root_argument: str, query: str, limit: int) -> dict[str, Any]:
@@ -362,7 +406,6 @@ def query_report(root_argument: str, query: str, limit: int) -> dict[str, Any]:
     terms = list(dict.fromkeys(tokenize(query)))
     if not terms:
         raise KnowledgeError("query must contain at least one searchable term")
-    query_folded = query.strip().casefold()
     searchable = [
         record for record in records if Path(record.relative).name != "_index.md"
     ]
@@ -370,44 +413,52 @@ def query_report(root_argument: str, query: str, limit: int) -> dict[str, Any]:
     for index in records:
         if Path(index.relative).name != "_index.md":
             continue
-        for match in INDEX_ENTRY_RE.finditer(index.text):
+        for match in iter_index_entries(index):
             normalized = normalize_index_path(index.relative, match.group(1))
             if normalized is not None:
                 index_context.setdefault(normalized, []).append(match.group(2) or "")
 
-    searchable_text = {
-        record.relative: (
-            record.text + "\n" + "\n".join(index_context.get(record.relative, []))
-        ).casefold()
-        for record in searchable
-    }
+    token_sets: dict[str, set[str]] = {}
+    token_counts: dict[str, Counter[str]] = {}
+    title_tokens: dict[str, set[str]] = {}
+    path_tokens: dict[str, set[str]] = {}
+    ordered_tokens: dict[str, list[str]] = {}
+    for record in searchable:
+        title = tokenize(record.title)
+        path = tokenize(PurePosixPath(record.relative).with_suffix("").as_posix())
+        body_and_index = tokenize(
+            record.body + "\n" + "\n".join(index_context.get(record.relative, []))
+        )
+        combined = title + path + body_and_index
+        title_tokens[record.relative] = set(title)
+        path_tokens[record.relative] = set(path)
+        ordered_tokens[record.relative] = combined
+        token_sets[record.relative] = set(combined)
+        token_counts[record.relative] = Counter(combined)
+
     document_frequency = {
         term: sum(
             1
             for record in searchable
-            if term in searchable_text[record.relative]
-            or term in record.relative.casefold()
+            if term in token_sets[record.relative]
         )
         for term in terms
     }
     ranked: list[tuple[int, KnowledgeFile, list[str]]] = []
     for record in searchable:
-        path_folded = record.relative.casefold()
-        title_folded = record.title.casefold()
-        text_folded = searchable_text[record.relative]
-        matched = [term for term in terms if term in text_folded or term in path_folded]
+        matched = [term for term in terms if term in token_sets[record.relative]]
         if not matched:
             continue
         score = 0
-        if query_folded and query_folded in text_folded:
+        if contains_sequence(ordered_tokens[record.relative], terms):
             score += 80
         for term in matched:
             frequency = max(document_frequency[term], 1)
             rarity = max(1, (len(searchable) * 10) // frequency)
             score += rarity
-            score += 30 if term in title_folded else 0
-            score += 20 if term in path_folded else 0
-            score += min(text_folded.count(term), 3)
+            score += 30 if term in title_tokens[record.relative] else 0
+            score += 20 if term in path_tokens[record.relative] else 0
+            score += min(token_counts[record.relative][term], 3)
         score += 10 * (len(matched) - 1)
         ranked.append((score, record, matched))
     ranked.sort(key=lambda item: (-item[0], item[1].relative))
@@ -476,16 +527,21 @@ def mask_inline_code(line: str) -> str:
     return "".join(masked)
 
 
-def markdown_prose(text: str) -> str:
-    """Mask fenced and inline code while preserving prose offsets."""
+def markdown_prose(text: str, *, mask_inline: bool = True) -> str:
+    """Mask Markdown code blocks and optionally inline code, preserving offsets."""
     output: list[str] = []
     fence_character = ""
     fence_length = 0
     for line in text.splitlines(keepends=True):
-        fence = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        fence = re.match(r"^ {0,3}(`{3,}|~{3,})([^\r\n]*)", line)
         if fence_character:
             marker = fence.group(1) if fence else ""
-            if marker.startswith(fence_character) and len(marker) >= fence_length:
+            remainder = fence.group(2) if fence else ""
+            if (
+                marker.startswith(fence_character)
+                and len(marker) >= fence_length
+                and not remainder.strip(" \t")
+            ):
                 fence_character = ""
                 fence_length = 0
             output.append("\n" if line.endswith("\n") else "")
@@ -496,7 +552,10 @@ def markdown_prose(text: str) -> str:
             fence_length = len(marker)
             output.append("\n" if line.endswith("\n") else "")
             continue
-        output.append(mask_inline_code(line))
+        if line.startswith("    ") or line.startswith("\t"):
+            output.append("\n" if line.endswith("\n") else "")
+            continue
+        output.append(mask_inline_code(line) if mask_inline else line)
     return "".join(output)
 
 
@@ -611,7 +670,7 @@ def reindex_report(root_argument: str) -> dict[str, Any]:
 
     indexed_paths: set[str] = set()
     for index in indexes:
-        for entry in INDEX_ENTRY_RE.finditer(index.text):
+        for entry in iter_index_entries(index):
             raw_path = entry.group(1)
             normalized = normalize_index_path(index.relative, raw_path)
             if normalized is None:
@@ -647,14 +706,14 @@ def reindex_report(root_argument: str) -> dict[str, Any]:
         if prime and prime.casefold() not in {"true", "false"}:
             findings.append(Finding("invalid-frontmatter", record.relative, f"prime={prime}"))
 
-        prose = markdown_prose(record.text)
+        prose = markdown_prose(record.body)
         for wikilink in WIKILINK_RE.finditer(prose):
             if not is_escaped(prose, wikilink.start()):
                 findings.append(
                     Finding(
                         "wrong-link-style",
                         record.relative,
-                        f"[[{wikilink.group(1)}]]",
+                        wikilink.group(0),
                     )
                 )
         for raw_target in iter_markdown_link_targets(prose):

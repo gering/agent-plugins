@@ -434,8 +434,8 @@ class StructureCheckTests(unittest.TestCase):
     def test_readme_versions_are_associated_with_plugins(self) -> None:
         readme_path = self.root / "README.md"
         readme = readme_path.read_text(encoding="utf-8")
-        readme = readme.replace("knowledge-system 1.9.0", "knowledge-system 1.8.0")
-        readme = readme.replace("work-system 1.8.0", "work-system 1.9.0")
+        readme = readme.replace("knowledge-system 1.9.0", "knowledge-system 1.8.1")
+        readme = readme.replace("work-system 1.8.1", "work-system 1.9.0")
         readme_path.write_text(readme, encoding="utf-8")
         result = self.run_check()
         self.assertNotEqual(result.returncode, 0)

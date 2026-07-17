@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -124,6 +125,23 @@ Request authentication validates a session token before routing.
         payload = json.loads(result.stdout)
         self.assertEqual(payload["matches"][0]["path"], ".claude/knowledge/frobnicator.md")
 
+    def test_query_uses_tokens_and_excludes_frontmatter(self) -> None:
+        self.write(
+            "background.md",
+            self.document("Background jobs", "Ongoing background processing."),
+        )
+        self.write(
+            "_index.md",
+            "# Knowledge Index\n\n"
+            "- `architecture/auth.md` — Authentication flow\n"
+            "- `background.md` — Background jobs\n",
+        )
+        for query in ("Go", "plugin version"):
+            with self.subTest(query=query):
+                result = self.run_tool("query", query, "--format", "json")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout)["matches"], [])
+
     def test_query_rejects_empty_search_terms(self) -> None:
         result = self.run_tool("query", "the and wie")
         self.assertEqual(result.returncode, 2)
@@ -224,6 +242,21 @@ Request authentication validates a session token before routing.
         }
         self.assertEqual(missing, omitted)
 
+    def test_reindex_rejects_empty_provenance_metadata(self) -> None:
+        auth_path = self.knowledge / "architecture/auth.md"
+        content = auth_path.read_text(encoding="utf-8")
+        for field in ("createdFrom", "updatedFrom", "reindexedAt"):
+            content = re.sub(rf"(?m)^{field}:.*$", f"{field}:", content)
+        auth_path.write_text(content, encoding="utf-8")
+        result = self.run_tool("reindex", "--check", "--format", "json")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        invalid = {
+            item["detail"]
+            for item in json.loads(result.stdout)["findings"]
+            if item["kind"] == "invalid-frontmatter"
+        }
+        self.assertEqual(invalid, {"createdFrom", "updatedFrom", "reindexedAt"})
+
     def test_reindex_rejects_link_escaping_project_root(self) -> None:
         auth = (self.knowledge / "architecture/auth.md").read_text(encoding="utf-8")
         self.write("architecture/auth.md", auth + "\n[outside](../../../../outside.md)\n")
@@ -244,7 +277,10 @@ Request authentication validates a session token before routing.
 `[inline](missing.md)`
 ```markdown
 [fenced](missing.md)
+```not-a-closing-fence
+[still-fenced](missing.md)
 ```
+    [indented](missing.md)
 [space](<../../../docs/file with space.md>)
 [parentheses](../../../docs/guide_(v2).md)
 """
@@ -252,6 +288,50 @@ Request authentication validates a session token before routing.
         result = self.run_tool("reindex", "--check", "--format", "json")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["findings"], [])
+
+    def test_reindex_ignores_index_entries_in_code_blocks(self) -> None:
+        self.write(
+            "_index.md",
+            "# Knowledge Index\n\n"
+            "- `architecture/auth.md` — Authentication flow\n\n"
+            "```markdown\n"
+            "- `example-only.md` — not an index entry\n"
+            "```\n\n"
+            "    - `indented-example.md` — also not an index entry\n",
+        )
+        result = self.run_tool("reindex", "--check", "--format", "json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["findings"], [])
+        query = self.run_tool("query", "example-only", "--format", "json")
+        self.assertEqual(query.returncode, 0, query.stderr)
+        self.assertEqual(json.loads(query.stdout)["matches"], [])
+
+    def test_reindex_audits_body_but_not_frontmatter_links(self) -> None:
+        auth_path = self.knowledge / "architecture/auth.md"
+        content = auth_path.read_text(encoding="utf-8").replace(
+            "title: Authentication flow",
+            'title: "[metadata](missing.md) ![[metadata-embed]]"',
+        )
+        auth_path.write_text(content, encoding="utf-8")
+        result = self.run_tool("reindex", "--check", "--format", "json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["findings"], [])
+
+    def test_reindex_reports_embedded_wikilinks(self) -> None:
+        auth_path = self.knowledge / "architecture/auth.md"
+        auth_path.write_text(
+            auth_path.read_text(encoding="utf-8") + "\n![[memory-note]]\n",
+            encoding="utf-8",
+        )
+        result = self.run_tool("reindex", "--check", "--format", "json")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertTrue(
+            any(
+                finding["kind"] == "wrong-link-style"
+                and finding["detail"] == "![[memory-note]]"
+                for finding in json.loads(result.stdout)["findings"]
+            )
+        )
 
     def test_reindex_rejects_impossible_calendar_date(self) -> None:
         auth_path = self.knowledge / "architecture/auth.md"
@@ -287,13 +367,13 @@ Request authentication validates a session token before routing.
         original_reader = KNOWLEDGE_TOOL.read_regular_file_at
         swapped = False
 
-        def swap_then_read(directory_descriptor, name, shown_path, size):
+        def swap_then_read(directory_descriptor, name, shown_path, expected):
             nonlocal swapped
             if name == "doc.md" and not swapped:
                 swapped = True
                 section.rename(section.with_name("section-old"))
                 section.symlink_to(outside, target_is_directory=True)
-            return original_reader(directory_descriptor, name, shown_path, size)
+            return original_reader(directory_descriptor, name, shown_path, expected)
 
         with mock.patch.object(
             KNOWLEDGE_TOOL, "read_regular_file_at", side_effect=swap_then_read
@@ -302,6 +382,93 @@ Request authentication validates a session token before routing.
                 KNOWLEDGE_TOOL.KnowledgeError, "changed during inspection"
             ):
                 KNOWLEDGE_TOOL.query_report(str(self.root), "needle", 3)
+
+    def test_file_aba_swap_during_scan_fails_closed(self) -> None:
+        victim = self.knowledge / "architecture/auth.md"
+        backup = self.knowledge / "architecture/auth.backup"
+        outside = self.root / "outside.md"
+        original = victim.read_text(encoding="utf-8")
+        replacement = original.replace("Authentication flow", "Intrusion attempt!!")
+        replacement = replacement.replace("session token", "secret token ")
+        self.assertEqual(len(original.encode()), len(replacement.encode()))
+        outside.write_text(replacement, encoding="utf-8")
+
+        original_reader = KNOWLEDGE_TOOL.read_regular_file_at
+        swapped = False
+
+        def swap_then_read(directory_descriptor, name, shown_path, expected):
+            nonlocal swapped
+            if name == "auth.md" and not swapped:
+                swapped = True
+                victim.rename(backup)
+                outside.rename(victim)
+                try:
+                    return original_reader(
+                        directory_descriptor, name, shown_path, expected
+                    )
+                finally:
+                    victim.rename(outside)
+                    backup.rename(victim)
+            return original_reader(directory_descriptor, name, shown_path, expected)
+
+        with mock.patch.object(
+            KNOWLEDGE_TOOL, "read_regular_file_at", side_effect=swap_then_read
+        ):
+            with self.assertRaisesRegex(
+                KNOWLEDGE_TOOL.KnowledgeError, "changed during read"
+            ):
+                KNOWLEDGE_TOOL.query_report(str(self.root), "secret", 3)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFOs unavailable")
+    def test_reader_opens_raced_fifo_nonblocking_and_fails_closed(self) -> None:
+        source = self.knowledge / "architecture/auth.md"
+        expected = source.stat()
+        fifo = self.root / "replacement.fifo"
+        os.mkfifo(fifo)
+        real_open = os.open
+
+        def open_fifo(name, flags, *, dir_fd=None):
+            self.assertTrue(flags & os.O_NONBLOCK)
+            return real_open(fifo, flags)
+
+        with mock.patch.object(KNOWLEDGE_TOOL.os, "open", side_effect=open_fifo):
+            with self.assertRaisesRegex(
+                KNOWLEDGE_TOOL.KnowledgeError, "not a regular file"
+            ):
+                KNOWLEDGE_TOOL.read_regular_file_at(
+                    -1, "auth.md", source, expected
+                )
+
+    def test_in_place_change_during_read_fails_closed(self) -> None:
+        source = self.knowledge / "architecture/auth.md"
+        original = source.read_text(encoding="utf-8")
+        replacement = original.replace("session token", "secret token ")
+        self.assertEqual(len(original.encode()), len(replacement.encode()))
+        expected = source.stat()
+        parent = os.open(source.parent, os.O_RDONLY | os.O_DIRECTORY)
+        real_read = os.read
+        changed = False
+
+        def change_then_read(descriptor, size):
+            nonlocal changed
+            if not changed:
+                changed = True
+                source.write_text(replacement, encoding="utf-8")
+            return real_read(descriptor, size)
+
+        try:
+            with mock.patch.object(
+                KNOWLEDGE_TOOL.os, "read", side_effect=change_then_read
+            ):
+                with self.assertRaisesRegex(
+                    KNOWLEDGE_TOOL.KnowledgeError, "changed during read"
+                ):
+                    KNOWLEDGE_TOOL.read_regular_file_at(
+                        parent, "auth.md", source, expected
+                    )
+        finally:
+            os.close(parent)
+            source.write_text(original, encoding="utf-8")
 
     def test_unsupported_secure_io_fails_closed(self) -> None:
         with mock.patch.object(

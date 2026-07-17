@@ -14,14 +14,14 @@ for detailed status.
 ## Tracked upstream
 
 - Repository: `gering/claude-plugins`
-- Reviewed commit: `563daf9c8d38278ee3889cfd337b3c6eed715675`
-- Review date: 2026-07-17
-- Upstream versions: knowledge-system 1.9.0, work-system 1.8.0,
-  pr-flow 1.3.0, swarm 0.4.3
+- Reviewed commit: `9eabb766d3c87f1bcdaeddbd8d31e415ce9a8e68`
+- Review date: 2026-07-18
+- Upstream versions: knowledge-system 1.9.0, work-system 1.8.1,
+  pr-flow 1.3.0, swarm 0.5.0
 - Uncommitted upstream changes were detected and explicitly excluded.
-- New committed upstream changes through `563daf9` were classified read-only;
-  dirty sibling paths were excluded. Herdr task-state glyph synchronization and
-  Swarm's removal of the retired Grok Composer backend remain unported.
+- New committed upstream changes through `9eabb76` were classified read-only;
+  dirty sibling paths were excluded. Herdr Manager/tab-label synchronization and
+  Swarm's clustered 11-lens review pipeline remain unported.
   Use `python3 scripts/check-upstream.py` to compare the recorded state with
   the locally cached upstream `origin/main` ref.
 
@@ -53,8 +53,8 @@ codex plugin add knowledge-system@gering-agent-plugins
 ```
 
 `project-adoption` and `knowledge-system` currently require a POSIX host. They
-fail closed on Windows or any host without descriptor-relative no-follow file
-I/O rather than reducing their target-containment guarantees.
+fail closed on Windows or any host without descriptor-relative nonblocking,
+no-follow file I/O rather than reducing their target-containment guarantees.
 
 For local development, substitute the repository checkout path for
 `gering/agent-plugins`. Start a new Codex session after installing or updating,
