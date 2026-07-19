@@ -5,24 +5,23 @@
 remains the Claude Code distribution and current feature reference. The two
 repositories are independently installable and released separately.
 
-This repository is in early implementation. The read-only
-`project-adoption` workflow is installable for both Codex and Grok via their
-native marketplaces and manifests; the remaining workflows stay unavailable
-until their skills and behavioral checks exist. See the [parity ledger](docs/parity.md) for the detailed status.
+This repository is in early implementation. The read-only `project-adoption`
+workflow and the query/read-only-reindex slice of `knowledge-system` are
+installable for both Codex and Grok. Remaining workflows stay unavailable until
+their skills and behavioral checks exist. See the [parity ledger](docs/parity.md)
+for detailed status.
 
 ## Tracked upstream
 
 - Repository: `gering/claude-plugins`
-- Reviewed commit: `9fd980c7e72352fec4e6d143053f7d2d4e1931b2`
-- Review date: 2026-07-14
-- Upstream versions: knowledge-system 1.8.2, work-system 1.6.0,
-  pr-flow 1.2.3, swarm 0.4.0
+- Reviewed commit: `68a261f8d94817842eae4bb1dbf15ff09e7fa964`
+- Review date: 2026-07-19
+- Upstream versions: knowledge-system 1.9.0, work-system 1.9.0,
+  pr-flow 1.3.0, swarm 0.5.1
 - Uncommitted upstream changes were detected and explicitly excluded.
-- The merged swarm 0.3.0 upstream was reviewed without importing dirty files.
-  Later knowledge-only reindex/link fixes through `87917b5` were also reviewed;
-  PR #27's pr-flow review-table alignment through `390c1ca` and PR #28's
-  finding-fence hardening through `59996c2` were reviewed next. No runtime
-  implementation was imported.
+- New committed upstream changes through `68a261f` were classified read-only;
+  dirty sibling paths were excluded. Work's selectable Claude/Codex/Grok worker
+  registry and Swarm's hardened design-lens loop remain unported.
   Use `python3 scripts/check-upstream.py` to compare the recorded state with
   the locally cached upstream `origin/main` ref.
 
@@ -31,7 +30,7 @@ until their skills and behavioral checks exist. See the [parity ledger](docs/par
 | Plugin | Codex | Grok |
 |---|---|---|
 | project-adoption | partial | partial |
-| knowledge-system | planned | planned |
+| knowledge-system | partial | partial |
 | work-system | planned | planned |
 | pr-flow | planned | planned |
 
@@ -42,19 +41,20 @@ until their skills and behavioral checks exist. See the [parity ledger](docs/par
 Codex uses `.agents/plugins/marketplace.json` and per-plugin
 `.codex-plugin/plugin.json` manifests. The layout follows the current
 [OpenAI plugin documentation](https://developers.openai.com/codex/plugins/build)
-and was checked with Codex CLI 0.144.1.
+and was checked with Codex CLI 0.144.4.
 
-Install the current Codex marketplace and adoption plugin:
+Install the current Codex marketplace and available plugins:
 
 ```bash
 codex plugin marketplace add gering/agent-plugins --ref main
 codex plugin list
 codex plugin add project-adoption@gering-agent-plugins
+codex plugin add knowledge-system@gering-agent-plugins
 ```
 
-`project-adoption` currently requires a POSIX host. It fails closed on Windows
-or any host without descriptor-relative no-follow file I/O rather than reducing
-its target-containment guarantees.
+`project-adoption` and `knowledge-system` currently require a POSIX host. They
+fail closed on Windows or any host without descriptor-relative nonblocking,
+no-follow file I/O rather than reducing their target-containment guarantees.
 
 For local development, substitute the repository checkout path for
 `gering/agent-plugins`. Start a new Codex session after installing or updating,
@@ -66,6 +66,11 @@ separate coverage values. Normal repositories, linked worktrees, and bound
 submodules are supported; unbound `--separate-git-dir` layouts fail with an
 explicit unsupported-layout error.
 
+Invoke `$query` to rank and read up to three matching files from
+`.claude/knowledge/`. Invoke `$reindex` for a deterministic read-only index,
+frontmatter, and link audit. This slice never writes the knowledge store and
+does not silently fall back to source-code exploration.
+
 ## Grok marketplace
 
 Grok Build provides native plugin and marketplace commands. This
@@ -73,8 +78,8 @@ repository therefore uses `.grok-plugin/marketplace.json` and per-plugin
 `.grok-plugin/plugin.json` manifests instead of relying on Grok's Claude
 compatibility discovery.
 
-`project-adoption` is the first installable Grok plugin (thin native adapter
-delegating to shared read-only auditor).
+`project-adoption` and `knowledge-system` are installable Grok plugins with thin
+native adapters over shared read-only helpers.
 
 The repeatable local flow is:
 
@@ -87,12 +92,15 @@ grok plugin marketplace list
 #    or Direct install from source:
 grok plugin validate ./plugins/project-adoption
 grok plugin install ./plugins/project-adoption
+grok plugin validate ./plugins/knowledge-system
+grok plugin install ./plugins/knowledge-system
 ```
 
 Validate always with a directory path (not plugin name). After install start
 a fresh session (or use `grok inspect`) to discover the skill. Invoke with
-`/adopt-claude-project <target>`. If a global skill has the same name, use an
-isolated `GROK_HOME` or rename/disable the legacy skill before invoking.
+`/adopt-claude-project <target>`, `/query <question>`, or `/reindex`. If a global
+skill has the same name, use an isolated `GROK_HOME` or rename/disable the
+legacy skill before invoking.
 
 See [Grok installation](docs/grok-installation.md) for validation and update
 details.

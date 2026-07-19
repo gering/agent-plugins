@@ -1,0 +1,4 @@
+interface:
+  display_name: "Query Knowledge"
+  short_description: "Find relevant durable project knowledge"
+  default_prompt: "Use $query to answer from versioned project knowledge."

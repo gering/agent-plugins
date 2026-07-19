@@ -15,7 +15,8 @@ gering/agent-plugins    Codex and Grok distribution
 ```
 
 This architecture was reviewed for the Codex/Grok-only Phase 1 boundary on
-2026-07-12. The review used Codex CLI 0.144.1 and Grok Build 0.2.93. In
+2026-07-12 and rechecked on 2026-07-16 with Codex CLI 0.144.4 and Grok Build
+0.2.101. In
 particular, Grok now exposes native plugin, marketplace, validation, launch,
 and resume commands; the design therefore uses Grok's native plugin surface
 instead of treating Claude compatibility discovery as the distribution path.
@@ -155,7 +156,7 @@ names, or Claude session commands.
 ### Grok
 
 Grok distribution uses its native plugin interface, verified with Grok Build
-0.2.93:
+0.2.101:
 
 - `.grok-plugin/marketplace.json` for the repository marketplace
 - `.grok-plugin/plugin.json` for each Grok plugin

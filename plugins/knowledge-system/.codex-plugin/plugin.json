@@ -1,20 +1,31 @@
 {
   "name": "knowledge-system",
-  "version": "0.1.0",
-  "description": "Keep durable project knowledge versioned and agent-neutral.",
+  "version": "0.2.0+codex.20260719115840",
+  "description": "Query and audit durable project knowledge with native Codex workflows.",
   "author": {
     "name": "gering"
   },
   "repository": "https://github.com/gering/agent-plugins",
   "license": "MIT",
-  "keywords": ["knowledge", "memory", "codex", "grok"],
+  "keywords": [
+    "knowledge",
+    "memory",
+    "query",
+    "reindex",
+    "codex",
+    "grok"
+  ],
+  "skills": "./skills/",
   "interface": {
     "displayName": "Knowledge System",
-    "shortDescription": "Version durable project knowledge.",
-    "longDescription": "Maintains durable project knowledge independently of runtime-specific local memory stores.",
+    "shortDescription": "Query and audit durable project knowledge.",
+    "longDescription": "Searches versioned project knowledge and audits indexes, links, and metadata without changing project files.",
     "developerName": "gering",
     "category": "Productivity",
-    "capabilities": [],
-    "defaultPrompt": "Inspect this project's durable knowledge."
+    "capabilities": [
+      "query",
+      "read-only reindex check"
+    ],
+    "defaultPrompt": "Use $query to answer from this project's versioned knowledge."
   }
 }

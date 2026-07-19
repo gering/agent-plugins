@@ -9,6 +9,11 @@
       "name": "project-adoption",
       "source": "./plugins/project-adoption",
       "description": "Run a POSIX-only, read-only audit before adopting Codex or Grok."
+    },
+    {
+      "name": "knowledge-system",
+      "source": "./plugins/knowledge-system",
+      "description": "Query and audit versioned project knowledge without changing it."
     }
   ]
 }
