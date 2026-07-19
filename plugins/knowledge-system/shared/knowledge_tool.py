@@ -32,14 +32,22 @@ REQUIRED_FRONTMATTER = (
     "pluginVersion",
     "prime",
 )
-NON_EMPTY_FRONTMATTER = REQUIRED_FRONTMATTER
+NON_EMPTY_FRONTMATTER = (
+    "title",
+    "createdAt",
+    "updatedAt",
+    "reindexedAt",
+    "pluginVersion",
+    "prime",
+)
 DATE_FIELDS = ("createdAt", "updatedAt", "reindexedAt")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 WIKILINK_RE = re.compile(r"!?\[\[([^\]]+)\]\]")
 INDEX_ENTRY_RE = re.compile(
-    r"(?m)^\s*-\s+`([^`\n]+\.md)`(?:\s*(?:—|-|:)\s*(.*))?$"
+    r"(?m)^[ \t]*-[ \t]+`([^`\n]+\.md)`"
+    r"(?:[ \t]*(?:—|-|:)[ \t]*(.*))?$"
 )
-TOKEN_RE = re.compile(r"[\w-]+", re.UNICODE)
+TOKEN_RE = re.compile(r"[\w-]+(?:\+\+|#)?", re.UNICODE)
 STOP_WORDS = {
     "a", "about", "an", "and", "auf", "aus", "bei", "bitte", "das", "dem",
     "den", "der", "die", "did", "do", "does", "ein", "eine", "einer", "erkläre",
@@ -83,12 +91,23 @@ def file_signature(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
     )
 
 
+def directory_signature(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
 def secure_io_supported() -> bool:
     return (
         os.name == "posix"
         and hasattr(os, "O_NOFOLLOW")
         and hasattr(os, "O_NONBLOCK")
         and os.open in getattr(os, "supports_dir_fd", set())
+        and os.scandir in getattr(os, "supports_fd", set())
         and os.stat in getattr(os, "supports_dir_fd", set())
     )
 
@@ -127,7 +146,10 @@ class StoreAnchor:
             self.knowledge_descriptor = os.open(
                 "knowledge", directory_flags, dir_fd=self.runtime_descriptor
             )
-            self.knowledge_identity = self._identity(self.knowledge_descriptor)
+            knowledge_metadata = os.fstat(self.knowledge_descriptor)
+            if not stat.S_ISDIR(knowledge_metadata.st_mode):
+                raise KnowledgeError("knowledge anchor is not a directory")
+            self.knowledge_signature = directory_signature(knowledge_metadata)
             self.verify()
         except FileNotFoundError as exc:
             self.close()
@@ -167,8 +189,7 @@ class StoreAnchor:
             or not stat.S_ISDIR(runtime_metadata.st_mode)
             or (runtime_metadata.st_dev, runtime_metadata.st_ino) != self.runtime_identity
             or not stat.S_ISDIR(knowledge_metadata.st_mode)
-            or (knowledge_metadata.st_dev, knowledge_metadata.st_ino)
-            != self.knowledge_identity
+            or directory_signature(knowledge_metadata) != self.knowledge_signature
         ):
             raise KnowledgeError("knowledge store changed during inspection")
 
@@ -277,16 +298,24 @@ def scan_store(root_argument: str) -> tuple[Path, Path, list[KnowledgeFile]]:
             if depth > MAX_DEPTH:
                 raise KnowledgeError(f"knowledge store exceeds depth {MAX_DEPTH}")
             anchor.verify()
-            names = sorted(os.listdir(directory_descriptor), key=os.fsencode)
+            opened_directory = os.fstat(directory_descriptor)
+            if not stat.S_ISDIR(opened_directory.st_mode):
+                raise KnowledgeError("knowledge directory changed during inspection")
+            expected_directory = directory_signature(opened_directory)
+            names: list[str] = []
+            with os.scandir(directory_descriptor) as entries:
+                for entry in entries:
+                    visited += 1
+                    if visited > MAX_FILES:
+                        raise KnowledgeError(
+                            f"knowledge store exceeds {MAX_FILES} filesystem entries"
+                        )
+                    names.append(entry.name)
+            names.sort(key=os.fsencode)
             for name in names:
                 metadata = os.stat(
                     name, dir_fd=directory_descriptor, follow_symlinks=False
                 )
-                visited += 1
-                if visited > MAX_FILES:
-                    raise KnowledgeError(
-                        f"knowledge store exceeds {MAX_FILES} filesystem entries"
-                    )
                 relative = relative_directory / name
                 shown_path = anchor.knowledge / Path(relative.as_posix())
                 if stat.S_ISLNK(metadata.st_mode):
@@ -301,10 +330,7 @@ def scan_store(root_argument: str) -> tuple[Path, Path, list[KnowledgeFile]]:
                     )
                     try:
                         opened = os.fstat(child)
-                        if (opened.st_dev, opened.st_ino) != (
-                            metadata.st_dev,
-                            metadata.st_ino,
-                        ):
+                        if directory_signature(opened) != directory_signature(metadata):
                             raise KnowledgeError(
                                 "knowledge directory changed during inspection: "
                                 f"{display_path(shown_path)}"
@@ -317,8 +343,8 @@ def scan_store(root_argument: str) -> tuple[Path, Path, list[KnowledgeFile]]:
                         )
                         if (
                             not stat.S_ISDIR(current.st_mode)
-                            or (current.st_dev, current.st_ino)
-                            != (metadata.st_dev, metadata.st_ino)
+                            or directory_signature(current)
+                            != directory_signature(metadata)
                         ):
                             raise KnowledgeError(
                                 "knowledge directory changed during inspection: "
@@ -362,6 +388,8 @@ def scan_store(root_argument: str) -> tuple[Path, Path, list[KnowledgeFile]]:
                         frontmatter,
                     )
                 )
+            if directory_signature(os.fstat(directory_descriptor)) != expected_directory:
+                raise KnowledgeError("knowledge directory changed during inspection")
 
         walk_directory(anchor.knowledge_descriptor, PurePosixPath(), 0)
         anchor.verify()
@@ -376,12 +404,12 @@ def tokenize(value: str) -> list[str]:
     for item in TOKEN_RE.findall(value):
         folded = item.casefold()
         candidates = [folded]
-        if "-" in folded:
-            candidates.extend(part for part in folded.split("-") if part)
+        if "-" in folded or "_" in folded:
+            candidates.extend(part for part in re.split(r"[-_]", folded) if part)
         tokens.extend(
             token
             for token in candidates
-            if len(token) > 1 and token not in STOP_WORDS
+            if (len(token) > 1 or token == "r") and token not in STOP_WORDS
         )
     return tokens
 
@@ -427,7 +455,9 @@ def query_report(root_argument: str, query: str, limit: int) -> dict[str, Any]:
         title = tokenize(record.title)
         path = tokenize(PurePosixPath(record.relative).with_suffix("").as_posix())
         body_and_index = tokenize(
-            record.body + "\n" + "\n".join(index_context.get(record.relative, []))
+            markdown_prose(record.body, mask_inline=False)
+            + "\n"
+            + "\n".join(index_context.get(record.relative, []))
         )
         combined = title + path + body_and_index
         title_tokens[record.relative] = set(title)
@@ -527,13 +557,41 @@ def mask_inline_code(line: str) -> str:
     return "".join(masked)
 
 
+def normalized_indentation(line: str) -> str:
+    """Expand only leading tabs so indentation can be compared in columns."""
+    columns = 0
+    index = 0
+    while index < len(line) and line[index] in " \t":
+        if line[index] == " ":
+            columns += 1
+        else:
+            columns += 4 - (columns % 4)
+        index += 1
+    return " " * columns + line[index:]
+
+
 def markdown_prose(text: str, *, mask_inline: bool = True) -> str:
     """Mask Markdown code blocks and optionally inline code, preserving offsets."""
     output: list[str] = []
     fence_character = ""
     fence_length = 0
+    list_content_indent: int | None = None
     for line in text.splitlines(keepends=True):
-        fence = re.match(r"^ {0,3}(`{3,}|~{3,})([^\r\n]*)", line)
+        normalized = normalized_indentation(line)
+        blank = not normalized.strip(" \t\r\n")
+        raw_indent = len(normalized) - len(normalized.lstrip(" "))
+        if not fence_character and not blank:
+            if list_content_indent is not None and raw_indent < list_content_indent:
+                list_content_indent = None
+        analysis_line = normalized
+        container_indent = 0
+        if list_content_indent is not None and raw_indent >= list_content_indent:
+            container_indent = list_content_indent
+            analysis_line = normalized[list_content_indent:]
+        list_item = re.match(
+            r"^ {0,3}(?:[-+*]|\d{1,9}[.)])([ \t]+)", analysis_line
+        )
+        fence = re.match(r"^ {0,3}(`{3,}|~{3,})([^\r\n]*)", analysis_line)
         if fence_character:
             marker = fence.group(1) if fence else ""
             remainder = fence.group(2) if fence else ""
@@ -552,7 +610,11 @@ def markdown_prose(text: str, *, mask_inline: bool = True) -> str:
             fence_length = len(marker)
             output.append("\n" if line.endswith("\n") else "")
             continue
-        if line.startswith("    ") or line.startswith("\t"):
+        if list_item:
+            list_content_indent = container_indent + list_item.end()
+            output.append(mask_inline_code(line) if mask_inline else line)
+            continue
+        if analysis_line.startswith("    "):
             output.append("\n" if line.endswith("\n") else "")
             continue
         output.append(mask_inline_code(line) if mask_inline else line)
@@ -639,12 +701,13 @@ def resolve_markdown_target(
     target = parse_markdown_destination(raw)
     if target is None:
         return "skip", None
-    target = urllib.parse.unquote(target).split("#", 1)[0].split("?", 1)[0]
-    if not target or target.startswith("#"):
+    target = target.split("#", 1)[0].split("?", 1)[0]
+    if not target:
         return "skip", None
     parsed = urllib.parse.urlparse(target)
     if parsed.scheme or target.startswith("//"):
         return "skip", None
+    target = urllib.parse.unquote(target)
     if target.startswith("/"):
         candidate = root / target.lstrip("/")
     else:

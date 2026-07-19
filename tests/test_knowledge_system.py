@@ -142,6 +142,58 @@ Request authentication validates a session token before routing.
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(json.loads(result.stdout)["matches"], [])
 
+    def test_query_excludes_block_code_but_keeps_inline_identifiers(self) -> None:
+        self.write(
+            "examples.md",
+            self.document(
+                "Examples",
+                """Visible prose.
+```sh
+fencedneedle --help
+```
+    indentedneedle --help
+Use `inlineneedle` when configuring the feature.
+""",
+            ),
+        )
+        self.write(
+            "_index.md",
+            "# Knowledge Index\n\n"
+            "- `architecture/auth.md` — Authentication flow\n"
+            "- `examples.md` — Examples\n",
+        )
+        for query in ("fencedneedle", "indentedneedle"):
+            with self.subTest(query=query):
+                result = self.run_tool("query", query, "--format", "json")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout)["matches"], [])
+        inline = self.run_tool("query", "inlineneedle", "--format", "json")
+        self.assertEqual(inline.returncode, 0, inline.stderr)
+        self.assertEqual(
+            json.loads(inline.stdout)["matches"][0]["path"],
+            ".claude/knowledge/examples.md",
+        )
+
+    def test_query_normalizes_technical_tokens(self) -> None:
+        self.write(
+            "identifiers.md",
+            self.document("Identifiers", "request_id is shared by C++, C#, and R."),
+        )
+        self.write(
+            "_index.md",
+            "# Knowledge Index\n\n"
+            "- `architecture/auth.md` — Authentication flow\n"
+            "- `identifiers.md` — Technical identifiers\n",
+        )
+        for query in ("request id", "C++", "C#", "R"):
+            with self.subTest(query=query):
+                result = self.run_tool("query", query, "--format", "json")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    json.loads(result.stdout)["matches"][0]["path"],
+                    ".claude/knowledge/identifiers.md",
+                )
+
     def test_query_rejects_empty_search_terms(self) -> None:
         result = self.run_tool("query", "the and wie")
         self.assertEqual(result.returncode, 2)
@@ -242,7 +294,7 @@ Request authentication validates a session token before routing.
         }
         self.assertEqual(missing, omitted)
 
-    def test_reindex_rejects_empty_provenance_metadata(self) -> None:
+    def test_reindex_allows_empty_origins_but_rejects_empty_reindex_date(self) -> None:
         auth_path = self.knowledge / "architecture/auth.md"
         content = auth_path.read_text(encoding="utf-8")
         for field in ("createdFrom", "updatedFrom", "reindexedAt"):
@@ -255,7 +307,7 @@ Request authentication validates a session token before routing.
             for item in json.loads(result.stdout)["findings"]
             if item["kind"] == "invalid-frontmatter"
         }
-        self.assertEqual(invalid, {"createdFrom", "updatedFrom", "reindexedAt"})
+        self.assertEqual(invalid, {"reindexedAt"})
 
     def test_reindex_rejects_link_escaping_project_root(self) -> None:
         auth = (self.knowledge / "architecture/auth.md").read_text(encoding="utf-8")
@@ -305,6 +357,51 @@ Request authentication validates a session token before routing.
         query = self.run_tool("query", "example-only", "--format", "json")
         self.assertEqual(query.returncode, 0, query.stderr)
         self.assertEqual(json.loads(query.stdout)["matches"], [])
+
+    def test_reindex_keeps_adjacent_descriptionless_index_entries(self) -> None:
+        self.write("second.md", self.document("Second", "Second body."))
+        self.write(
+            "_index.md",
+            "# Knowledge Index\n\n"
+            "- `architecture/auth.md`\n"
+            "- `second.md`\n",
+        )
+        result = self.run_tool("reindex", "--check", "--format", "json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["findings"], [])
+
+    def test_reindex_checks_links_in_list_continuations(self) -> None:
+        auth_path = self.knowledge / "architecture/auth.md"
+        auth_path.write_text(
+            auth_path.read_text(encoding="utf-8")
+            + "\n- Related:\n    [nested](missing.md)\n",
+            encoding="utf-8",
+        )
+        result = self.run_tool("reindex", "--check", "--format", "json")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertTrue(
+            any(
+                finding["kind"] == "dead-reference"
+                and finding["detail"] == "missing.md"
+                for finding in json.loads(result.stdout)["findings"]
+            )
+        )
+
+    def test_reindex_preserves_percent_encoded_filename_delimiters(self) -> None:
+        docs = self.root / "docs"
+        docs.mkdir()
+        (docs / "name#part.md").write_text("# Hash\n", encoding="utf-8")
+        (docs / "question?part.md").write_text("# Question\n", encoding="utf-8")
+        auth_path = self.knowledge / "architecture/auth.md"
+        auth_path.write_text(
+            auth_path.read_text(encoding="utf-8")
+            + "\n[hash](../../../docs/name%23part.md)\n"
+            + "[question](../../../docs/question%3Fpart.md)\n",
+            encoding="utf-8",
+        )
+        result = self.run_tool("reindex", "--check", "--format", "json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["findings"], [])
 
     def test_reindex_audits_body_but_not_frontmatter_links(self) -> None:
         auth_path = self.knowledge / "architecture/auth.md"
@@ -469,6 +566,63 @@ Request authentication validates a session token before routing.
         finally:
             os.close(parent)
             source.write_text(original, encoding="utf-8")
+
+    def test_directory_addition_during_scan_fails_closed(self) -> None:
+        original_reader = KNOWLEDGE_TOOL.read_regular_file_at
+        added = False
+
+        def add_then_read(directory_descriptor, name, shown_path, expected):
+            nonlocal added
+            if name == "auth.md" and not added:
+                added = True
+                self.write("late.md", self.document("Late", "secret"))
+            return original_reader(directory_descriptor, name, shown_path, expected)
+
+        with mock.patch.object(
+            KNOWLEDGE_TOOL, "read_regular_file_at", side_effect=add_then_read
+        ):
+            with self.assertRaisesRegex(
+                KNOWLEDGE_TOOL.KnowledgeError, "directory changed"
+            ):
+                KNOWLEDGE_TOOL.query_report(str(self.root), "auth", 3)
+
+    def test_directory_enumeration_stops_at_entry_bound(self) -> None:
+        class FakeEntry:
+            def __init__(self, name):
+                self.name = name
+
+        class BoundedScandir:
+            def __init__(self, testcase):
+                self.testcase = testcase
+                self.count = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return None
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.count += 1
+                self.testcase.assertLessEqual(self.count, 3)
+                return FakeEntry(f"entry-{self.count}")
+
+        scanner = BoundedScandir(self)
+        with (
+            mock.patch.object(KNOWLEDGE_TOOL, "MAX_FILES", 2),
+            mock.patch.object(
+                KNOWLEDGE_TOOL, "secure_io_supported", return_value=True
+            ),
+            mock.patch.object(KNOWLEDGE_TOOL.os, "scandir", return_value=scanner),
+        ):
+            with self.assertRaisesRegex(
+                KNOWLEDGE_TOOL.KnowledgeError, "exceeds 2 filesystem entries"
+            ):
+                KNOWLEDGE_TOOL.query_report(str(self.root), "auth", 3)
+        self.assertEqual(scanner.count, 3)
 
     def test_unsupported_secure_io_fails_closed(self) -> None:
         with mock.patch.object(

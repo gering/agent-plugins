@@ -7,34 +7,34 @@ scaffolding alone does not qualify.
 ## Upstream baseline
 
 - Claude source: [`gering/claude-plugins`](https://github.com/gering/claude-plugins)
-- Last reviewed commit: `9eabb766d3c87f1bcdaeddbd8d31e415ce9a8e68`
-- Last sync review: 2026-07-18
+- Last reviewed commit: `68a261f8d94817842eae4bb1dbf15ff09e7fa964`
+- Last sync review: 2026-07-19
 - Dirty upstream files and untracked directories were excluded from the review.
-- Latest observed upstream `main`: `9eabb766d3c87f1bcdaeddbd8d31e415ce9a8e68`.
+- Latest observed upstream `main`: `68a261f8d94817842eae4bb1dbf15ff09e7fa964`.
   Run `python3 scripts/check-upstream.py` to audit it against the locally
   cached sibling `origin/main`; refresh remote refs separately for network
   freshness.
 
 ## Latest upstream review
 
-Committed changes through `9eabb76` were reviewed read-only while dirty sibling
-paths remained excluded. Upstream fixed Work's herdr tab-label refresh and added
-the stateless Manager glyph (`work-system` 1.8.1), then expanded Swarm to 11
-lenses in four clusters with separately verified design findings (`swarm`
-0.5.0). Those Claude/herdr and Swarm runtime changes are classified but
-unported. Knowledge remains at 1.9.0 and PR Flow at 1.3.0; this slice maps only
-query and read-only reindex-check behavior.
+Committed changes through `68a261f` were reviewed read-only while dirty sibling
+paths remained excluded. Work now selects Claude, Codex, or Grok workers from a
+bounded registry and persists a project default (`work-system` 1.9.0). Swarm's
+11-lens pipeline now hardens design-only termination, pending decisions, and
+untagged-finding classification (`swarm` 0.5.1). Those Claude/herdr and Swarm
+runtime changes are classified but unported. Knowledge remains at 1.9.0 and PR
+Flow at 1.3.0; this slice maps only query and read-only reindex-check behavior.
 
 Allowed states are `missing`, `planned`, `partial`, `parity`, and
 `intentional-divergence`.
 
 | Plugin | Claude source | Codex status | Grok status | Last sync | Differences | Evidence |
 |---|---|---|---|---|---|---|
-| project-adoption | New companion capability; no single Claude plugin source | partial | partial | 2026-07-18 / `9eabb766d3c87f1bcdaeddbd8d31e415ce9a8e68` | Codex and Grok ship thin native adapters over the same POSIX-only, read-only shared auditor (audit_project.py). Unbound `--separate-git-dir`, Windows support, and approved apply mode remain planned. | Deterministic suite, native manifest validation, isolated install/discovery, and non-mutating muellmann-app.de dogfood. |
-| knowledge-system | 1.9.0 at `9eabb766d3c87f1bcdaeddbd8d31e415ce9a8e68` | partial | partial | 2026-07-18 / `9eabb766d3c87f1bcdaeddbd8d31e415ce9a8e68` | Versioned `.claude/knowledge/` remains canonical. Query does not silently fall back to source exploration. Reindex is a deterministic read-only check; writes, semantic cross-link/duplicate/staleness analysis, curate, init, prime, and statusline remain planned. Both native adapters require POSIX descriptor-relative nonblocking no-follow I/O with file-identity checks. | Shared helper and four native skills validated; 149-test suite covers descriptor races, token ranking, frontmatter, Markdown, indexes, and no-write behavior; non-mutating muellmann-app.de dogfood routes `Angebotsrechner`, rejects metadata-only query matches, and reports 15 metadata findings without changing knowledge hashes; Codex cache install and isolated-GROK_HOME discovery of query/reindex. |
-| work-system | 1.8.1 at `9eabb766d3c87f1bcdaeddbd8d31e415ce9a8e68` | planned | planned | 2026-07-18 / `9eabb766d3c87f1bcdaeddbd8d31e415ce9a8e68` | Launch/resume will use native Codex and Grok/herdr commands; upstream statusline, Manager glyph, and corrected tab-label refresh are unported. | Committed herdr Manager/tab-label changes classified read-only; no native workflow tests. |
-| pr-flow | 1.3.0 at `9eabb766d3c87f1bcdaeddbd8d31e415ce9a8e68` | planned | planned | 2026-07-18 / `9eabb766d3c87f1bcdaeddbd8d31e415ce9a8e68` | Local review is separated from optional GitHub `@claude review`; upstream herdr glyph refresh hooks are unported. | Committed PR-side glyph refresh changes classified read-only; no native workflow tests. |
-| swarm | 0.5.0 at `9eabb766d3c87f1bcdaeddbd8d31e415ce9a8e68` | missing | missing | 2026-07-18 / `9eabb766d3c87f1bcdaeddbd8d31e415ce9a8e68` | Evaluation deferred until core workflows are stable; clustered 11-lens review, design applicability verification, and split defect/design reporting are reviewed but unported. | Committed upstream changes classified read-only; no runtime implementation. |
+| project-adoption | New companion capability; no single Claude plugin source | partial | partial | 2026-07-19 / `68a261f8d94817842eae4bb1dbf15ff09e7fa964` | Codex and Grok ship thin native adapters over the same POSIX-only, read-only shared auditor (audit_project.py). Unbound `--separate-git-dir`, Windows support, and approved apply mode remain planned. | Deterministic suite, native manifest validation, isolated install/discovery, and non-mutating muellmann-app.de dogfood. |
+| knowledge-system | 1.9.0 at `68a261f8d94817842eae4bb1dbf15ff09e7fa964` | partial | partial | 2026-07-19 / `68a261f8d94817842eae4bb1dbf15ff09e7fa964` | Versioned `.claude/knowledge/` remains canonical. Query does not silently fall back to source exploration. Reindex is a deterministic read-only check; writes, semantic cross-link/duplicate/staleness analysis, curate, init, prime, and statusline remain planned. Both native adapters require POSIX descriptor-relative nonblocking no-follow I/O with bounded directory snapshots plus file and directory signature checks. | Shared helper and four native skills validated; 156-test suite covers descriptor races and entry bounds, technical-token ranking, frontmatter, Markdown block/list/link cases, indexes, and no-write behavior; non-mutating muellmann-app.de dogfood routes `Angebotsrechner`, rejects metadata-only query matches, and reports 15 metadata findings without changing knowledge hashes; Codex cache install and isolated-GROK_HOME discovery of query/reindex. |
+| work-system | 1.9.0 at `68a261f8d94817842eae4bb1dbf15ff09e7fa964` | planned | planned | 2026-07-19 / `68a261f8d94817842eae4bb1dbf15ff09e7fa964` | Launch/resume will use native Codex and Grok/herdr commands; upstream selectable worker registry, project default, and non-Claude lifecycle degradation are unported. | Committed worker-selection changes classified read-only; no native workflow tests. |
+| pr-flow | 1.3.0 at `68a261f8d94817842eae4bb1dbf15ff09e7fa964` | planned | planned | 2026-07-19 / `68a261f8d94817842eae4bb1dbf15ff09e7fa964` | Local review is separated from optional GitHub `@claude review`; upstream herdr glyph refresh hooks are unported. | Committed PR-side glyph refresh changes classified read-only; no native workflow tests. |
+| swarm | 0.5.1 at `68a261f8d94817842eae4bb1dbf15ff09e7fa964` | missing | missing | 2026-07-19 / `68a261f8d94817842eae4bb1dbf15ff09e7fa964` | Evaluation deferred until core workflows are stable; clustered 11-lens review, design applicability verification, pending-decision handling, and design-only termination are reviewed but unported. | Committed upstream changes classified read-only; no runtime implementation. |
 
 ## Baseline limitations
 

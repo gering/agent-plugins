@@ -712,8 +712,13 @@ def validate_knowledge_system_slice() -> None:
             or "O_NOFOLLOW" not in helper
             or "O_NONBLOCK" not in helper
             or "file_signature" not in helper
+            or "directory_signature" not in helper
+            or "os.scandir" not in helper
         ):
-            fail("knowledge-system shared helper must reject raced path traversal")
+            fail(
+                "knowledge-system shared helper must use bounded, "
+                "race-resistant path traversal"
+            )
 
 
 def validate_adapter_boundaries() -> None:

@@ -14,14 +14,14 @@ for detailed status.
 ## Tracked upstream
 
 - Repository: `gering/claude-plugins`
-- Reviewed commit: `9eabb766d3c87f1bcdaeddbd8d31e415ce9a8e68`
-- Review date: 2026-07-18
-- Upstream versions: knowledge-system 1.9.0, work-system 1.8.1,
-  pr-flow 1.3.0, swarm 0.5.0
+- Reviewed commit: `68a261f8d94817842eae4bb1dbf15ff09e7fa964`
+- Review date: 2026-07-19
+- Upstream versions: knowledge-system 1.9.0, work-system 1.9.0,
+  pr-flow 1.3.0, swarm 0.5.1
 - Uncommitted upstream changes were detected and explicitly excluded.
-- New committed upstream changes through `9eabb76` were classified read-only;
-  dirty sibling paths were excluded. Herdr Manager/tab-label synchronization and
-  Swarm's clustered 11-lens review pipeline remain unported.
+- New committed upstream changes through `68a261f` were classified read-only;
+  dirty sibling paths were excluded. Work's selectable Claude/Codex/Grok worker
+  registry and Swarm's hardened design-lens loop remain unported.
   Use `python3 scripts/check-upstream.py` to compare the recorded state with
   the locally cached upstream `origin/main` ref.
 
