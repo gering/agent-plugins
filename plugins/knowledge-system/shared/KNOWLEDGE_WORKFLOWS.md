@@ -15,8 +15,11 @@ directory changes during inspection.
 Run the shared helper from the target project:
 
 ```bash
-python3 <plugin-root>/shared/knowledge_tool.py query "<question>" --root .
+python3 <plugin-root>/shared/knowledge_tool.py query --root . -- "<question>"
 ```
+
+Put all helper options before `--`; the separator keeps questions beginning
+with `-`, including `--help`, from being interpreted as helper options.
 
 The helper reads only Markdown files below `.claude/knowledge/`, tokenizes the
 question, and ranks matches from document bodies, titles, extension-free paths,
@@ -35,12 +38,16 @@ This first native reindex slice is deliberately read-only:
 python3 <plugin-root>/shared/knowledge_tool.py reindex --check --root .
 ```
 
-It checks root-index coverage, stale index entries, missing provenance fields,
-non-empty and calendar-valid frontmatter values, Markdown links, wikilinks,
-size and entry-count limits, UTF-8, and descriptor-anchored race/symlink
-containment. Link and index checks ignore frontmatter and Markdown block-code
-examples. Exit status `0` means clean, `1` means maintenance findings, and `2`
-means the inspection could not complete safely.
+It checks root-index coverage, stale index entries, required provenance keys,
+selected non-empty values, calendar-valid dates, inline and reference-style
+Markdown links, wikilinks, size and entry-count limits, UTF-8, and
+descriptor-anchored race/symlink containment. `createdFrom` and `updatedFrom`
+must exist but may be empty when their origin is unresolved; `title`, all three
+dates, `pluginVersion`, and `prime` must be non-empty. Link and index checks
+ignore frontmatter, HTML comments, and Markdown block-code examples. Finding
+counts cover the complete audit while serialized details are bounded and report
+their truncation explicitly. Exit status `0` means clean, `1` means maintenance
+findings, and `2` means the inspection could not complete safely.
 
 Do not edit the knowledge store while following this workflow. Index and
 frontmatter writes, semantic duplicate/staleness analysis, cross-link

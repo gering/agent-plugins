@@ -194,6 +194,77 @@ Use `inlineneedle` when configuring the feature.
                     ".claude/knowledge/identifiers.md",
                 )
 
+    def test_query_normalizes_compound_terms_in_both_directions(self) -> None:
+        self.write(
+            "identifiers.md",
+            self.document("Identifiers", "The request id is propagated."),
+        )
+        self.write(
+            "_index.md",
+            "# Knowledge Index\n\n"
+            "- `architecture/auth.md` — Authentication flow\n"
+            "- `identifiers.md` — Technical identifiers\n",
+        )
+        for query in ("request_id", "request-id"):
+            with self.subTest(query=query):
+                result = self.run_tool("query", query, "--format", "json")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    json.loads(result.stdout)["matches"][0]["path"],
+                    ".claude/knowledge/identifiers.md",
+                )
+
+    def test_query_accepts_leading_dash_terms_after_separator(self) -> None:
+        self.write(
+            "flags.md",
+            self.document("Command flags", "Use --dry-run or --help for previews."),
+        )
+        self.write(
+            "_index.md",
+            "# Knowledge Index\n\n"
+            "- `architecture/auth.md` — Authentication flow\n"
+            "- `flags.md` — Command flags\n",
+        )
+        for query in ("--dry-run", "--help"):
+            with self.subTest(query=query):
+                result = self.run_tool(
+                    "query", "--format", "json", "--", query
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    json.loads(result.stdout)["matches"][0]["path"],
+                    ".claude/knowledge/flags.md",
+                )
+
+    def test_query_excludes_quoted_code_comments_and_fenced_fallback_title(
+        self,
+    ) -> None:
+        self.write(
+            "quoted.md",
+            """> ```markdown
+> # fencedtitleneedle
+> quotedcodeneedle
+> ```
+<!-- hiddencommentneedle -->
+Visible prose.
+""",
+        )
+        self.write(
+            "_index.md",
+            "# Knowledge Index\n\n"
+            "- `architecture/auth.md` — Authentication flow\n"
+            "- `quoted.md` — Visible prose\n",
+        )
+        for query in (
+            "fencedtitleneedle",
+            "quotedcodeneedle",
+            "hiddencommentneedle",
+        ):
+            with self.subTest(query=query):
+                result = self.run_tool("query", query, "--format", "json")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout)["matches"], [])
+
     def test_query_rejects_empty_search_terms(self) -> None:
         result = self.run_tool("query", "the and wie")
         self.assertEqual(result.returncode, 2)
@@ -239,6 +310,23 @@ Use `inlineneedle` when configuring the feature.
     def test_crlf_frontmatter_is_valid(self) -> None:
         path = self.knowledge / "architecture/auth.md"
         path.write_bytes(path.read_text(encoding="utf-8").replace("\n", "\r\n").encode())
+        result = self.run_tool("reindex", "--check", "--format", "json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["findings"], [])
+
+    def test_bom_and_inline_frontmatter_comments_are_valid(self) -> None:
+        path = self.knowledge / "architecture/auth.md"
+        content = path.read_text(encoding="utf-8")
+        content = content.replace(
+            "title: Authentication flow",
+            'title: "Authentication flow" # display title',
+        )
+        content = content.replace(
+            "createdAt: 2026-07-01",
+            "createdAt: 2026-07-01 # initial date",
+        )
+        content = content.replace("prime: true", "prime: true # indexed")
+        path.write_bytes(b"\xef\xbb\xbf" + content.encode("utf-8"))
         result = self.run_tool("reindex", "--check", "--format", "json")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["findings"], [])
@@ -370,6 +458,21 @@ Use `inlineneedle` when configuring the feature.
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["findings"], [])
 
+    def test_reindex_accepts_uppercase_suffix_and_trailing_index_whitespace(
+        self,
+    ) -> None:
+        source = self.knowledge / "architecture/auth.md"
+        target = source.with_name("AUTH.MD")
+        source.rename(target)
+        self.write(
+            "_index.md",
+            "# Knowledge Index\n\n"
+            "- `architecture/AUTH.MD`  \n",
+        )
+        result = self.run_tool("reindex", "--check", "--format", "json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["findings"], [])
+
     def test_reindex_checks_links_in_list_continuations(self) -> None:
         auth_path = self.knowledge / "architecture/auth.md"
         auth_path.write_text(
@@ -396,12 +499,79 @@ Use `inlineneedle` when configuring the feature.
         auth_path.write_text(
             auth_path.read_text(encoding="utf-8")
             + "\n[hash](../../../docs/name%23part.md)\n"
-            + "[question](../../../docs/question%3Fpart.md)\n",
+            + "[question](../../../docs/question%3Fpart.md)\n"
+            + r"[escaped hash](../../../docs/name\#part.md)" + "\n"
+            + r"[escaped question](../../../docs/question\?part.md)" + "\n",
             encoding="utf-8",
         )
         result = self.run_tool("reindex", "--check", "--format", "json")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["findings"], [])
+
+    def test_reindex_checks_reference_style_links(self) -> None:
+        docs = self.root / "docs"
+        docs.mkdir()
+        guide = docs / "guide.md"
+        guide.write_text("# Guide\n", encoding="utf-8")
+        auth_path = self.knowledge / "architecture/auth.md"
+        auth_path.write_text(
+            auth_path.read_text(encoding="utf-8")
+            + "\nRead [the guide][guide].\n"
+            + '[guide]: ../../../docs/guide.md "Guide title"\n',
+            encoding="utf-8",
+        )
+        clean = self.run_tool("reindex", "--check", "--format", "json")
+        self.assertEqual(clean.returncode, 0, clean.stderr)
+        guide.unlink()
+        broken = self.run_tool("reindex", "--check", "--format", "json")
+        self.assertEqual(broken.returncode, 1, broken.stderr)
+        self.assertTrue(
+            any(
+                item["kind"] == "dead-reference"
+                and item["detail"] == "../../../docs/guide.md"
+                for item in json.loads(broken.stdout)["findings"]
+            )
+        )
+
+    def test_reindex_ignores_quoted_code_and_html_comments(self) -> None:
+        auth_path = self.knowledge / "architecture/auth.md"
+        auth_path.write_text(
+            auth_path.read_text(encoding="utf-8")
+            + """
+> ```markdown
+> [quoted fence](missing-fence.md)
+> ```
+>     [quoted indent](missing-indent.md)
+<!-- [comment](missing-comment.md) -->
+""",
+            encoding="utf-8",
+        )
+        self.write(
+            "_index.md",
+            "# Knowledge Index\n\n"
+            "- `architecture/auth.md` — Authentication flow\n"
+            "<!--\n"
+            "- `missing-comment.md` — disabled\n"
+            "-->\n",
+        )
+        result = self.run_tool("reindex", "--check", "--format", "json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["findings"], [])
+
+    def test_reindex_bounds_retained_findings_but_counts_all(self) -> None:
+        auth_path = self.knowledge / "architecture/auth.md"
+        auth_path.write_text(
+            auth_path.read_text(encoding="utf-8")
+            + "".join(f"\n[missing {index}](missing-{index}.md)" for index in range(10)),
+            encoding="utf-8",
+        )
+        with mock.patch.object(KNOWLEDGE_TOOL, "MAX_RETAINED_FINDINGS", 3):
+            report = KNOWLEDGE_TOOL.reindex_report(str(self.root))
+        self.assertEqual(report["finding_total"], 10)
+        self.assertEqual(report["finding_counts"], {"dead-reference": 10})
+        self.assertEqual(report["findings_retained"], 3)
+        self.assertEqual(report["findings_truncated"], 7)
+        self.assertEqual(len(report["findings"]), 3)
 
     def test_reindex_audits_body_but_not_frontmatter_links(self) -> None:
         auth_path = self.knowledge / "architecture/auth.md"
@@ -479,6 +649,50 @@ Use `inlineneedle` when configuring the feature.
                 KNOWLEDGE_TOOL.KnowledgeError, "changed during inspection"
             ):
                 KNOWLEDGE_TOOL.query_report(str(self.root), "needle", 3)
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlinks unavailable")
+    def test_project_root_swap_before_resolution_fails_closed(self) -> None:
+        outside_temporary = tempfile.TemporaryDirectory()
+        outside = Path(outside_temporary.name)
+        outside_knowledge = outside / ".claude/knowledge"
+        outside_knowledge.mkdir(parents=True)
+        (outside_knowledge / "_index.md").write_text(
+            "# Knowledge Index\n\n- `secret.md` — secret\n",
+            encoding="utf-8",
+        )
+        (outside_knowledge / "secret.md").write_text(
+            self.document("Secret", "outside secret"),
+            encoding="utf-8",
+        )
+        original_resolve = KNOWLEDGE_TOOL.Path.resolve
+        backup = self.root.with_name(self.root.name + "-checked")
+        swapped = False
+
+        def swap_then_resolve(path, *args, **kwargs):
+            nonlocal swapped
+            if Path(path) == self.root and not swapped:
+                swapped = True
+                self.root.rename(backup)
+                self.root.symlink_to(outside, target_is_directory=True)
+            return original_resolve(path, *args, **kwargs)
+
+        try:
+            with mock.patch.object(
+                KNOWLEDGE_TOOL.Path,
+                "resolve",
+                autospec=True,
+                side_effect=swap_then_resolve,
+            ):
+                with self.assertRaisesRegex(
+                    KNOWLEDGE_TOOL.KnowledgeError, "project root changed"
+                ):
+                    KNOWLEDGE_TOOL.query_report(str(self.root), "secret", 3)
+        finally:
+            if self.root.is_symlink():
+                self.root.unlink()
+            if backup.exists():
+                backup.rename(self.root)
+            outside_temporary.cleanup()
 
     def test_file_aba_swap_during_scan_fails_closed(self) -> None:
         victim = self.knowledge / "architecture/auth.md"
@@ -623,6 +837,25 @@ Use `inlineneedle` when configuring the feature.
             ):
                 KNOWLEDGE_TOOL.query_report(str(self.root), "auth", 3)
         self.assertEqual(scanner.count, 3)
+
+    def test_malformed_link_scan_has_linear_escape_checks(self) -> None:
+        text = "[x" * 2_000
+        original_is_escaped = KNOWLEDGE_TOOL.is_escaped
+        calls = 0
+
+        def counted_is_escaped(value, index):
+            nonlocal calls
+            calls += 1
+            return original_is_escaped(value, index)
+
+        with mock.patch.object(
+            KNOWLEDGE_TOOL, "is_escaped", side_effect=counted_is_escaped
+        ):
+            self.assertEqual(
+                list(KNOWLEDGE_TOOL.iter_markdown_link_targets(text)),
+                [],
+            )
+        self.assertLess(calls, len(text) * 3)
 
     def test_unsupported_secure_io_fails_closed(self) -> None:
         with mock.patch.object(

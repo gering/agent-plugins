@@ -1,6 +1,6 @@
 {
   "name": "knowledge-system",
-  "version": "0.2.0+codex.20260719115840",
+  "version": "0.2.0+codex.20260723093543",
   "description": "Query and audit durable project knowledge with native Grok workflows.",
   "author": {
     "name": "gering"

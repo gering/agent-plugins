@@ -9,6 +9,8 @@ Resolve the plugin root with `grok plugin details knowledge-system` and use its
 `path` value. Read and follow
 `<plugin-root>/shared/KNOWLEDGE_WORKFLOWS.md`, then run its query command with
 the user's question and the current project as `--root`.
+Place helper options before the documented `--` separator so questions that
+begin with `-` remain positional query text.
 
 Read only the top matching knowledge files needed to answer, never more than
 three. Return a concise answer with consulted paths. Do not broaden the search

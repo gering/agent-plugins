@@ -22,6 +22,9 @@ MAX_FILE_BYTES = 512 * 1024
 MAX_TOTAL_BYTES = 32 * 1024 * 1024
 MAX_RESULTS = 10
 MAX_DEPTH = 64
+MAX_RETAINED_FINDINGS = 1_000
+MAX_FINDING_PATH_CHARS = 1_000
+MAX_FINDING_DETAIL_CHARS = 1_000
 REQUIRED_FRONTMATTER = (
     "title",
     "createdAt",
@@ -44,10 +47,14 @@ DATE_FIELDS = ("createdAt", "updatedAt", "reindexedAt")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 WIKILINK_RE = re.compile(r"!?\[\[([^\]]+)\]\]")
 INDEX_ENTRY_RE = re.compile(
-    r"(?m)^[ \t]*-[ \t]+`([^`\n]+\.md)`"
-    r"(?:[ \t]*(?:—|-|:)[ \t]*(.*))?$"
+    r"^[ \t]*-[ \t]+`([^`\n]+\.md)`"
+    r"(?:[ \t]*(?:—|-|:)[ \t]*(.*?))?[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
 )
 TOKEN_RE = re.compile(r"[\w-]+(?:\+\+|#)?", re.UNICODE)
+REFERENCE_DEFINITION_RE = re.compile(
+    r"(?m)^ {0,3}\[([^\]\r\n]+)\]:[ \t]*(.*)$"
+)
 STOP_WORDS = {
     "a", "about", "an", "and", "auf", "aus", "bei", "bitte", "das", "dem",
     "den", "der", "die", "did", "do", "does", "ein", "eine", "einer", "erkläre",
@@ -130,15 +137,30 @@ class StoreAnchor:
         if not stat.S_ISDIR(root_metadata.st_mode):
             raise KnowledgeError(f"project root is not a directory: {display_path(root_input)}")
 
-        self.root = root_input.resolve(strict=True)
-        self.knowledge = self.root / ".claude/knowledge"
+        self.root = root_input
+        self.knowledge = root_input / ".claude/knowledge"
         self.root_descriptor = -1
         self.runtime_descriptor = -1
         self.knowledge_descriptor = -1
         try:
             directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-            self.root_descriptor = os.open(self.root, directory_flags)
-            self.root_identity = self._identity(self.root_descriptor)
+            self.root_descriptor = os.open(root_input, directory_flags)
+            opened_root_identity = self._identity(self.root_descriptor)
+            checked_root_identity = (root_metadata.st_dev, root_metadata.st_ino)
+            if opened_root_identity != checked_root_identity:
+                raise KnowledgeError("project root changed during inspection")
+            resolved_root = root_input.resolve(strict=True)
+            resolved_metadata = resolved_root.lstat()
+            if (
+                stat.S_ISLNK(resolved_metadata.st_mode)
+                or not stat.S_ISDIR(resolved_metadata.st_mode)
+                or (resolved_metadata.st_dev, resolved_metadata.st_ino)
+                != opened_root_identity
+            ):
+                raise KnowledgeError("project root changed during inspection")
+            self.root = resolved_root
+            self.knowledge = self.root / ".claude/knowledge"
+            self.root_identity = opened_root_identity
             self.runtime_descriptor = os.open(
                 ".claude", directory_flags, dir_fd=self.root_descriptor
             )
@@ -251,13 +273,54 @@ def read_regular_file_at(
             raise KnowledgeError(
                 f"knowledge file changed during read: {display_path(shown_path)}"
             )
-        return payload.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        return payload.decode("utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
     except UnicodeDecodeError as exc:
         raise KnowledgeError(
             f"knowledge file is not UTF-8: {display_path(shown_path)}"
         ) from exc
     finally:
         os.close(descriptor)
+
+
+def parse_frontmatter_scalar(raw: str) -> str:
+    """Parse the scalar subset used by knowledge frontmatter."""
+    value = raw.strip()
+    if not value:
+        return ""
+    if value[0] == '"':
+        escaped = False
+        output: list[str] = []
+        for index in range(1, len(value)):
+            character = value[index]
+            if escaped:
+                escapes = {"n": "\n", "r": "\r", "t": "\t"}
+                output.append(escapes.get(character, character))
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                return "".join(output)
+            else:
+                output.append(character)
+        return value
+    if value[0] == "'":
+        output = []
+        index = 1
+        while index < len(value):
+            character = value[index]
+            if character == "'" and index + 1 < len(value) and value[index + 1] == "'":
+                output.append("'")
+                index += 2
+                continue
+            if character == "'":
+                return "".join(output)
+            output.append(character)
+            index += 1
+        return value
+    comment = re.search(r"[ \t]+#", value)
+    if comment:
+        value = value[: comment.start()].rstrip()
+    return value
 
 
 def parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
@@ -272,14 +335,15 @@ def parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
         if ":" not in line or line[:1].isspace():
             continue
         key, value = line.split(":", 1)
-        values[key.strip()] = value.strip().strip('"\'')
+        values[key.strip()] = parse_frontmatter_scalar(value)
     return values, text[end + 5 :]
 
 
 def title_for(relative: str, frontmatter: dict[str, str], body: str) -> str:
     if frontmatter.get("title"):
         return frontmatter["title"]
-    heading = re.search(r"(?m)^#\s+(.+?)\s*$", body)
+    visible_body = markdown_prose(body, mask_inline=False)
+    heading = re.search(r"(?m)^#\s+(.+?)\s*$", visible_body)
     if heading:
         return heading.group(1).strip()
     return Path(relative).stem.replace("-", " ").replace("_", " ").title()
@@ -399,13 +463,14 @@ def scan_store(root_argument: str) -> tuple[Path, Path, list[KnowledgeFile]]:
     return root, knowledge, records
 
 
-def tokenize(value: str) -> list[str]:
+def tokenize(value: str, *, include_compounds: bool = True) -> list[str]:
     tokens: list[str] = []
     for item in TOKEN_RE.findall(value):
         folded = item.casefold()
         candidates = [folded]
         if "-" in folded or "_" in folded:
-            candidates.extend(part for part in re.split(r"[-_]", folded) if part)
+            parts = [part for part in re.split(r"[-_]", folded) if part]
+            candidates = ([folded] if include_compounds else []) + parts
         tokens.extend(
             token
             for token in candidates
@@ -431,7 +496,7 @@ def iter_index_entries(record: KnowledgeFile):
 
 def query_report(root_argument: str, query: str, limit: int) -> dict[str, Any]:
     _, _, records = scan_store(root_argument)
-    terms = list(dict.fromkeys(tokenize(query)))
+    terms = list(dict.fromkeys(tokenize(query, include_compounds=False)))
     if not terms:
         raise KnowledgeError("query must contain at least one searchable term")
     searchable = [
@@ -570,28 +635,88 @@ def normalized_indentation(line: str) -> str:
     return " " * columns + line[index:]
 
 
+def strip_blockquote_markers(line: str) -> tuple[str, int]:
+    """Return content after leading CommonMark blockquote containers."""
+    depth = 0
+    remainder = line
+    while True:
+        marker = re.match(r"^ {0,3}>[ \t]?", remainder)
+        if marker is None:
+            return remainder, depth
+        remainder = remainder[marker.end() :]
+        depth += 1
+
+
+def list_item_content_start(line: str) -> int | None:
+    marker = re.match(r"^ {0,3}(?:[-+*]|\d{1,9}[.)])", line)
+    if marker is None or marker.end() >= len(line):
+        return None
+    if line[marker.end()] not in " \t":
+        return None
+    columns = 0
+    cursor = marker.end()
+    while cursor < len(line) and line[cursor] in " \t":
+        if line[cursor] == " ":
+            columns += 1
+        else:
+            columns += 4 - (columns % 4)
+        cursor += 1
+    return cursor if columns <= 4 else marker.end() + 1
+
+
+def mask_html_comments(text: str) -> str:
+    """Mask HTML comments while retaining line structure."""
+    masked = list(text)
+    cursor = 0
+    while cursor < len(text):
+        start = text.find("<!--", cursor)
+        if start < 0:
+            break
+        closing = text.find("-->", start + 4)
+        end = len(text) if closing < 0 else closing + 3
+        for offset in range(start, end):
+            if masked[offset] not in "\r\n":
+                masked[offset] = " "
+        cursor = end
+    return "".join(masked)
+
+
 def markdown_prose(text: str, *, mask_inline: bool = True) -> str:
-    """Mask Markdown code blocks and optionally inline code, preserving offsets."""
+    """Mask Markdown code blocks/comments and optionally inline code."""
     output: list[str] = []
     fence_character = ""
     fence_length = 0
     list_content_indent: int | None = None
+    list_quote_depth: int | None = None
     for line in text.splitlines(keepends=True):
         normalized = normalized_indentation(line)
-        blank = not normalized.strip(" \t\r\n")
-        raw_indent = len(normalized) - len(normalized.lstrip(" "))
+        outer_content, quote_depth = strip_blockquote_markers(normalized)
+        blank = not outer_content.strip(" \t\r\n")
+        raw_indent = len(outer_content) - len(outer_content.lstrip(" "))
         if not fence_character and not blank:
-            if list_content_indent is not None and raw_indent < list_content_indent:
+            if (
+                list_content_indent is not None
+                and (
+                    quote_depth != list_quote_depth
+                    or raw_indent < list_content_indent
+                )
+            ):
                 list_content_indent = None
-        analysis_line = normalized
+                list_quote_depth = None
+        analysis_line = outer_content
         container_indent = 0
         if list_content_indent is not None and raw_indent >= list_content_indent:
             container_indent = list_content_indent
-            analysis_line = normalized[list_content_indent:]
-        list_item = re.match(
-            r"^ {0,3}(?:[-+*]|\d{1,9}[.)])([ \t]+)", analysis_line
+            analysis_line = outer_content[list_content_indent:]
+        analysis_line, _ = strip_blockquote_markers(analysis_line)
+        list_item_start = list_item_content_start(analysis_line)
+        item_content = (
+            analysis_line[list_item_start:]
+            if list_item_start is not None
+            else analysis_line
         )
-        fence = re.match(r"^ {0,3}(`{3,}|~{3,})([^\r\n]*)", analysis_line)
+        item_content, _ = strip_blockquote_markers(item_content)
+        fence = re.match(r"^ {0,3}(`{3,}|~{3,})([^\r\n]*)", item_content)
         if fence_character:
             marker = fence.group(1) if fence else ""
             remainder = fence.group(2) if fence else ""
@@ -608,64 +733,118 @@ def markdown_prose(text: str, *, mask_inline: bool = True) -> str:
             marker = fence.group(1)
             fence_character = marker[0]
             fence_length = len(marker)
+            if list_item_start is not None:
+                list_content_indent = container_indent + list_item_start
+                list_quote_depth = quote_depth
             output.append("\n" if line.endswith("\n") else "")
             continue
-        if list_item:
-            list_content_indent = container_indent + list_item.end()
+        if list_item_start is not None:
+            list_content_indent = container_indent + list_item_start
+            list_quote_depth = quote_depth
+            if item_content.startswith("    "):
+                output.append("\n" if line.endswith("\n") else "")
+                continue
             output.append(mask_inline_code(line) if mask_inline else line)
             continue
         if analysis_line.startswith("    "):
             output.append("\n" if line.endswith("\n") else "")
             continue
         output.append(mask_inline_code(line) if mask_inline else line)
-    return "".join(output)
+    return mask_html_comments("".join(output))
+
+
+def normalized_reference_label(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip()).casefold()
+
+
+def reference_definitions(text: str) -> tuple[dict[str, str], list[tuple[int, int]]]:
+    definitions: dict[str, str] = {}
+    spans: list[tuple[int, int]] = []
+    for match in REFERENCE_DEFINITION_RE.finditer(text):
+        destination = parse_markdown_destination(match.group(2))
+        if destination is None:
+            continue
+        label = normalized_reference_label(match.group(1))
+        definitions.setdefault(label, destination)
+        spans.append((match.start(), match.end()))
+    return definitions, spans
+
+
+def find_unescaped(text: str, character: str, start: int) -> int:
+    cursor = start
+    while cursor < len(text):
+        found = text.find(character, cursor)
+        if found < 0 or not is_escaped(text, found):
+            return found
+        cursor = found + 1
+    return -1
 
 
 def iter_markdown_link_targets(text: str):
-    """Yield raw destinations from prose Markdown links with balanced parens."""
+    """Yield inline and reference-style destinations in linear time."""
+    definitions, definition_spans = reference_definitions(text)
+    span_index = 0
+    openers: list[int] = []
     index = 0
     while index < len(text):
+        if span_index < len(definition_spans):
+            span_start, span_end = definition_spans[span_index]
+            if index >= span_end:
+                span_index += 1
+                continue
+            if span_start <= index < span_end:
+                index = span_end
+                span_index += 1
+                continue
+        character = text[index]
         if (
-            text[index] != "["
-            or is_escaped(text, index)
-            or (index > 0 and text[index - 1] == "!")
-            or (index + 1 < len(text) and text[index + 1] == "[")
+            character == "["
+            and not is_escaped(text, index)
+            and not (index > 0 and text[index - 1] == "!")
+            and not (index + 1 < len(text) and text[index + 1] == "[")
         ):
+            openers.append(index)
             index += 1
             continue
-        bracket_depth = 1
-        cursor = index + 1
-        while cursor < len(text) and bracket_depth:
-            if not is_escaped(text, cursor):
-                if text[cursor] == "[":
-                    bracket_depth += 1
-                elif text[cursor] == "]":
-                    bracket_depth -= 1
-            cursor += 1
-        if bracket_depth or cursor >= len(text) or text[cursor] != "(":
+        if character != "]" or is_escaped(text, index) or not openers:
             index += 1
             continue
-        destination_start = cursor + 1
-        cursor = destination_start
-        parenthesis_depth = 1
-        in_angle = False
-        while cursor < len(text) and parenthesis_depth:
-            character = text[cursor]
-            if not is_escaped(text, cursor):
-                if character == "<" and cursor == destination_start:
-                    in_angle = True
-                elif character == ">" and in_angle:
-                    in_angle = False
-                elif not in_angle and character == "(":
-                    parenthesis_depth += 1
-                elif not in_angle and character == ")":
-                    parenthesis_depth -= 1
-            cursor += 1
-        if parenthesis_depth == 0:
-            yield text[destination_start : cursor - 1]
+        opening = openers.pop()
+        label = text[opening + 1 : index]
+        following = index + 1
+        if following < len(text) and text[following] == "(":
+            destination_start = following + 1
+            cursor = destination_start
+            parenthesis_depth = 1
+            in_angle = False
+            while cursor < len(text) and parenthesis_depth:
+                destination_character = text[cursor]
+                if not is_escaped(text, cursor):
+                    if destination_character == "<" and cursor == destination_start:
+                        in_angle = True
+                    elif destination_character == ">" and in_angle:
+                        in_angle = False
+                    elif not in_angle and destination_character == "(":
+                        parenthesis_depth += 1
+                    elif not in_angle and destination_character == ")":
+                        parenthesis_depth -= 1
+                cursor += 1
+            if parenthesis_depth == 0:
+                yield text[destination_start : cursor - 1]
             index = cursor
+            continue
+        reference_label = label
+        if following < len(text) and text[following] == "[":
+            closing = find_unescaped(text, "]", following + 1)
+            if closing < 0:
+                return
+            reference_label = text[following + 1 : closing] or label
+            index = closing + 1
         else:
             index += 1
+        destination = definitions.get(normalized_reference_label(reference_label))
+        if destination is not None:
+            yield destination
 
 
 def parse_markdown_destination(raw: str) -> str | None:
@@ -692,7 +871,14 @@ def parse_markdown_destination(raw: str) -> str | None:
                 break
             cursor += 1
         target = candidate[:cursor]
-    return re.sub(r"\\(.)", r"\1", target)
+    return target
+
+
+def strip_unescaped_link_suffix(target: str) -> str:
+    for index, character in enumerate(target):
+        if character in "#?" and not is_escaped(target, index):
+            return target[:index]
+    return target
 
 
 def resolve_markdown_target(
@@ -701,7 +887,8 @@ def resolve_markdown_target(
     target = parse_markdown_destination(raw)
     if target is None:
         return "skip", None
-    target = target.split("#", 1)[0].split("?", 1)[0]
+    target = strip_unescaped_link_suffix(target)
+    target = re.sub(r"\\(.)", r"\1", target)
     if not target:
         return "skip", None
     parsed = urllib.parse.urlparse(target)
@@ -720,16 +907,39 @@ def resolve_markdown_target(
     return "local", normalized
 
 
+def bounded_finding_value(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1] + "…"
+
+
 def reindex_report(root_argument: str) -> dict[str, Any]:
     root, knowledge, records = scan_store(root_argument)
     by_relative = {record.relative: record for record in records}
     content = [record for record in records if Path(record.relative).name != "_index.md"]
     indexes = [record for record in records if Path(record.relative).name == "_index.md"]
     findings: list[Finding] = []
+    finding_counts: Counter[str] = Counter()
+
+    def add_finding(kind: str, path: str, detail: str) -> None:
+        finding_counts[kind] += 1
+        if len(findings) >= MAX_RETAINED_FINDINGS:
+            return
+        findings.append(
+            Finding(
+                kind,
+                bounded_finding_value(path, MAX_FINDING_PATH_CHARS),
+                bounded_finding_value(detail, MAX_FINDING_DETAIL_CHARS),
+            )
+        )
 
     root_index = by_relative.get("_index.md")
     if root_index is None:
-        findings.append(Finding("missing-index", ".claude/knowledge/_index.md", "root index is required"))
+        add_finding(
+            "missing-index",
+            ".claude/knowledge/_index.md",
+            "root index is required",
+        )
 
     indexed_paths: set[str] = set()
     for index in indexes:
@@ -737,21 +947,26 @@ def reindex_report(root_argument: str) -> dict[str, Any]:
             raw_path = entry.group(1)
             normalized = normalize_index_path(index.relative, raw_path)
             if normalized is None:
-                findings.append(Finding("unsafe-index-path", index.relative, raw_path))
+                add_finding("unsafe-index-path", index.relative, raw_path)
                 continue
-            indexed_paths.add(normalized)
             if normalized not in by_relative or Path(normalized).name == "_index.md":
-                findings.append(Finding("stale-index-entry", index.relative, raw_path))
+                add_finding("stale-index-entry", index.relative, raw_path)
+            else:
+                indexed_paths.add(normalized)
 
     for record in content:
         if record.relative not in indexed_paths:
-            findings.append(Finding("missing-index-entry", record.relative, "not referenced by any _index.md"))
+            add_finding(
+                "missing-index-entry",
+                record.relative,
+                "not referenced by any _index.md",
+            )
         for field in REQUIRED_FRONTMATTER:
             if field not in record.frontmatter:
-                findings.append(Finding("missing-frontmatter", record.relative, field))
+                add_finding("missing-frontmatter", record.relative, field)
         for field in NON_EMPTY_FRONTMATTER:
             if field in record.frontmatter and not record.frontmatter[field]:
-                findings.append(Finding("invalid-frontmatter", record.relative, field))
+                add_finding("invalid-frontmatter", record.relative, field)
         for field in DATE_FIELDS:
             value = record.frontmatter.get(field)
             if value:
@@ -762,38 +977,36 @@ def reindex_report(root_argument: str) -> dict[str, Any]:
                 except ValueError:
                     valid_date = False
                 if not valid_date:
-                    findings.append(
-                        Finding("invalid-frontmatter", record.relative, f"{field}={value}")
+                    add_finding(
+                        "invalid-frontmatter",
+                        record.relative,
+                        f"{field}={value}",
                     )
         prime = record.frontmatter.get("prime")
         if prime and prime.casefold() not in {"true", "false"}:
-            findings.append(Finding("invalid-frontmatter", record.relative, f"prime={prime}"))
+            add_finding("invalid-frontmatter", record.relative, f"prime={prime}")
 
         prose = markdown_prose(record.body)
         for wikilink in WIKILINK_RE.finditer(prose):
             if not is_escaped(prose, wikilink.start()):
-                findings.append(
-                    Finding(
-                        "wrong-link-style",
-                        record.relative,
-                        wikilink.group(0),
-                    )
+                add_finding(
+                    "wrong-link-style",
+                    record.relative,
+                    wikilink.group(0),
                 )
         for raw_target in iter_markdown_link_targets(prose):
             kind, target = resolve_markdown_target(root, knowledge, record, raw_target)
             if kind == "skip":
                 continue
             if kind == "unsafe":
-                findings.append(Finding("unsafe-link", record.relative, raw_target))
+                add_finding("unsafe-link", record.relative, raw_target)
                 continue
             assert target is not None
             if not target.is_file():
-                findings.append(Finding("dead-reference", record.relative, raw_target))
+                add_finding("dead-reference", record.relative, raw_target)
 
     findings.sort(key=lambda item: (item.kind, item.path, item.detail))
-    counts: dict[str, int] = {}
-    for finding in findings:
-        counts[finding.kind] = counts.get(finding.kind, 0) + 1
+    finding_total = sum(finding_counts.values())
     return {
         "schema_version": 1,
         "command": "reindex-check",
@@ -802,7 +1015,10 @@ def reindex_report(root_argument: str) -> dict[str, Any]:
         "files_processed": len(records),
         "content_files": len(content),
         "index_files": len(indexes),
-        "finding_counts": counts,
+        "finding_counts": dict(sorted(finding_counts.items())),
+        "finding_total": finding_total,
+        "findings_retained": len(findings),
+        "findings_truncated": finding_total - len(findings),
         "findings": [asdict(item) for item in findings],
         "deferred_semantic_checks": [
             "cross-link proposals",
@@ -833,15 +1049,22 @@ def render_text(report: dict[str, Any]) -> str:
         return "\n".join(lines)
 
     findings = report["findings"]
+    finding_total = report["finding_total"]
     lines = [
         "Knowledge reindex check (read-only)",
         f"Scope: {report['scope']}",
         f"Processed: {report['content_files']} content files, {report['index_files']} indexes",
     ]
-    if not findings:
+    if finding_total == 0:
         lines.append("Result: deterministic checks clean.")
     else:
-        lines.append(f"Findings: {len(findings)}")
+        lines.append(f"Findings: {finding_total}")
+        if report["findings_truncated"]:
+            lines.append(
+                "Showing: "
+                f"{report['findings_retained']} bounded details "
+                f"({report['findings_truncated']} omitted)."
+            )
         for finding in findings:
             lines.append(f"- [{finding['kind']}] {finding['path']}: {finding['detail']}")
     lines.append("Deferred in this slice: " + ", ".join(report["deferred_semantic_checks"]) + ".")
@@ -876,7 +1099,7 @@ def main(argv: list[str] | None = None) -> int:
             if not args.check:
                 raise KnowledgeError("reindex currently requires --check; write mode is not available")
             report = reindex_report(args.root)
-            exit_code = 1 if report["findings"] else 0
+            exit_code = 1 if report["finding_total"] else 0
     except (KnowledgeError, OSError) as exc:
         print(f"knowledge-system: {exc}", file=sys.stderr)
         return 2

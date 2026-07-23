@@ -720,8 +720,8 @@ class ProjectAdoptionTests(unittest.TestCase):
         try:
             descriptor = os.open(raw_path, os.O_WRONLY | os.O_CREAT, 0o600)
         except OSError as exc:
-            if exc.errno == errno.EILSEQ:
-                self.skipTest("filesystem rejects non-UTF-8 path bytes")
+            if exc.errno in {errno.EILSEQ, errno.EPERM}:
+                self.skipTest("filesystem or sandbox rejects non-UTF-8 path bytes")
             raise
         try:
             os.write(descriptor, b"claude --resume\n")
